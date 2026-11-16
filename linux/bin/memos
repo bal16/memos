@@ -844,7 +844,7 @@ new_via_editor() {
 
   local tmp
   tmp="$(mktemp --suffix=.md /tmp/memos-XXXXXX)"
-  cleanup() { rm -f "$tmp"; }
+  cleanup() { rm -f "${tmp:-}"; }
   trap cleanup EXIT
 
   "$nvim_bin" \
@@ -855,6 +855,8 @@ new_via_editor() {
   if [[ -s "$tmp" ]]; then
     save_new_note "$(cat "$tmp")" "$MEMOS_VISIBILITY" "NORMAL" "false" "" "${MEMOS_QUICK_MODE:-local}" > /dev/null
   fi
+  trap - EXIT
+  rm -f "${tmp:-}"
 }
 
 cmd_new() {
