@@ -4,7 +4,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 cmd="${1:-install}"
 case "$cmd" in
-  install|update|uninstall|enable-timer|disable-timer|status|help)
+  install | update | uninstall | enable-timer | disable-timer | status | help)
     exec make "$cmd"
     ;;
   *)

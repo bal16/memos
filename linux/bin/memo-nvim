@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MEMO_QUICK="${MEMO_QUICK_BIN:-$SCRIPT_DIR/memo-quick}"
-if [[ ! -x "$MEMO_QUICK" ]] && command -v memo-quick >/dev/null 2>&1; then
+if [[ ! -x "$MEMO_QUICK" ]] && command -v memo-quick > /dev/null 2>&1; then
   MEMO_QUICK="$(command -v memo-quick)"
 fi
 

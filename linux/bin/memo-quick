@@ -18,7 +18,7 @@ MEMOS_VISIBILITY="${MEMOS_VISIBILITY:-PRIVATE}"
 MEMOS_API_PATH="${MEMOS_API_PATH:-}"
 
 usage() {
-  cat <<'EOF'
+  cat << 'EOF'
 Usage:
   memo-quick "note content"
   echo "note content" | memo-quick
@@ -35,8 +35,8 @@ EOF
 
 notify() {
   local msg="$1"
-  if command -v notify-send >/dev/null 2>&1; then
-    notify-send -a "$LOG_TAG" "$LOG_TAG" "$msg" >/dev/null 2>&1 || true
+  if command -v notify-send > /dev/null 2>&1; then
+    notify-send -a "$LOG_TAG" "$LOG_TAG" "$msg" > /dev/null 2>&1 || true
   fi
 }
 
@@ -47,8 +47,8 @@ ensure_dirs() {
 api_post() {
   local content="$1"
   [[ -z "$MEMOS_URL" || -z "$MEMOS_TOKEN" ]] && return 1
-  command -v curl >/dev/null 2>&1 || return 1
-  command -v jq >/dev/null 2>&1 || return 1
+  command -v curl > /dev/null 2>&1 || return 1
+  command -v jq > /dev/null 2>&1 || return 1
 
   local base="${MEMOS_URL%/}"
   local payload
@@ -67,7 +67,7 @@ api_post() {
       -X POST "${base}${path}" \
       -H "Authorization: Bearer ${MEMOS_TOKEN}" \
       -H "Content-Type: application/json" \
-      -d "$payload" 2>/dev/null) || continue
+      -d "$payload" 2> /dev/null) || continue
     code="${http:-000}"
     if [[ "$code" =~ ^2 ]]; then
       rm -f /tmp/memo-quick-resp.$$
@@ -80,7 +80,7 @@ api_post() {
 
 enqueue() {
   local content="$1"
-  command -v jq >/dev/null 2>&1 || return 1
+  command -v jq > /dev/null 2>&1 || return 1
   local line
   line=$(jq -c -n --arg content "$content" --arg visibility "$MEMOS_VISIBILITY" --arg ts "$(date -Iseconds)" '{content:$content, visibility:$visibility, created_at:$ts}')
   printf '%s\n' "$line" >> "$QUEUE_FILE"
@@ -88,25 +88,31 @@ enqueue() {
 
 flush_queue() {
   ensure_dirs
-  [[ -f "$QUEUE_FILE" ]] || { echo "Queue empty."; exit 0; }
-  command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
+  [[ -f "$QUEUE_FILE" ]] || {
+    echo "Queue empty."
+    exit 0
+  }
+  command -v jq > /dev/null 2>&1 || {
+    echo "jq required" >&2
+    exit 1
+  }
 
   local tmp ok=0 fail=0 line content vis old_vis
   tmp="$(mktemp "${QUEUE_FILE}.XXXXXX")"
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
-    content=$(printf '%s' "$line" | jq -r '.content // empty' 2>/dev/null || true)
-    vis=$(printf '%s' "$line" | jq -r '.visibility // empty' 2>/dev/null || true)
+    content=$(printf '%s' "$line" | jq -r '.content // empty' 2> /dev/null || true)
+    vis=$(printf '%s' "$line" | jq -r '.visibility // empty' 2> /dev/null || true)
     if [[ -z "$content" ]]; then
       continue
     fi
     old_vis="$MEMOS_VISIBILITY"
     [[ -n "$vis" ]] && MEMOS_VISIBILITY="$vis"
     if api_post "$content"; then
-      ok=$((ok+1))
+      ok=$((ok + 1))
     else
       printf '%s\n' "$line" >> "$tmp"
-      fail=$((fail+1))
+      fail=$((fail + 1))
     fi
     MEMOS_VISIBILITY="$old_vis"
   done < "$QUEUE_FILE"
@@ -157,7 +163,10 @@ main() {
   content="$(read_input "$@")"
   # Trim trailing whitespace/newlines noise but preserve internal formatting
   content="${content%$'\n'}"
-  [[ -z "${content//[[:space:]]/}" ]] && { echo "Empty note, nothing to do." >&2; exit 1; }
+  [[ -z "${content//[[:space:]]/}" ]] && {
+    echo "Empty note, nothing to do." >&2
+    exit 1
+  }
 
   append_local "$content"
 
