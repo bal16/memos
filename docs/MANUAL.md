@@ -6,7 +6,7 @@ This manual covers the local Linux `memos` CLI: quick capture, per-note local mi
 
 **Goal:** capture notes instantly on Linux, maintain a local Markdown mirror, and sync with a self-hosted Memos instance (Vercel + Neon).
 
-**Current implementation:** unified CLI with **per-note mirror** (one `.md` file per memo), **list/read/pull**, **create**, **edit/update** (push), and outbound queue + reconciliation foundation (PRD v0.2 Phase 5/6 foundation). Conflict resolution and delete propagation are still evolving.
+**Current implementation:** unified CLI with **per-note mirror** (one `.md` file per memo), **list/read/pull/create/edit**, **delete propagation**, and outbound queue + reconciliation foundation (PRD v0.2 Phase 5/6). Conflict resolution/reconciliation and sync scope (tags/pin/attachments/visibility-full) are still evolving.
 
 **Flow:** create/edit locally in mirror → push to Memos API (or queue if offline) → `memos sync`/timer flushes queue and pulls remote changes into mirror.
 
@@ -65,8 +65,9 @@ memos list                 # list local mirror
 memos list --remote        # list from API
 memos read <ref>           # show note (uid, name, filename, or prefix match)
 memos edit <ref>           # edit in $EDITOR and push update (or queue)
+memos rm <ref>             # delete note locally and remotely (alias: delete)
 
-memos sync                 # reconcile: flush/push queue + pull
+memos sync                 # reconcile: push dirty + flush queue + pull
 memos flush                # flush/push outbound queue only (alias: push)
 
 memos completion <shell>   # bash|zsh|fish
@@ -106,15 +107,17 @@ memos completion fish | source
 - **Pull:** `memos pull` fetches memos from API and writes/updates mirror files + state (cloud treated as authoritative source for pulled records).
 - **List/Read:** `memos list` reads local mirror; `memos read <ref>` resolves by uid/name/filename/prefix from mirror.
 - **Edit:** `memos edit <ref>` opens content in `$EDITOR`; on change updates local mirror and attempts API update (`PATCH`), else queues `update` op.
-- **Sync:** `memos sync` = `flush` (push queued ops) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
+- **Delete:** `memos rm <ref>` (or `delete`) removes the note locally and attempts remote delete (`DELETE`), else queues a `delete` op. `memos pull` detects notes deleted remotely (that were previously synced): removes them locally if clean, but keeps local copy and marks conflict (`remoteDeleted`) if locally modified.
+- **Sync:** `memos sync` = push dirty notes + `flush` (queued ops, incl. delete) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
 
 ### Legacy daily logs
 Earlier create-only flow appended to `~/notes/memos/YYYY-MM-DD.md` (`## HH:MM` entries) without recording remote IDs. These **legacy logs are not auto-migrated/mapped** into the per-note mirror (to avoid duplicates/ambiguous matching). Recommended: run `memos pull` to build the canonical mirror from cloud; keep old daily files as archive/reference (move aside if desired) and use `notes/*.md` as the working mirror going forward.
 
 ### Limitations (current)
-- Conflict resolution is basic/evolving (no full merge UI; concurrent edits may follow last-applied/pull-overwrite behavior in places — treat with care).
-- Delete propagation, attachments, tags/pins/visibility-full sync, and richer change detection are not fully implemented yet.
-- API shapes vary by Memos version; auto-detection covers common `/api` vs `/api/v1` layouts but edge cases may require `MEMOS_API_PATH`.
+- Conflict handling is basic: concurrent content edits may keep local and save remote as `notes/<uid>.remote-conflict-<ts>.md`; remote-deleted + locally-modified notes are kept locally and marked in state. There is no merge UI/automatic reconciliation flow yet.
+- Sync scope is incomplete: attachments, tags, pin/archive/visibility/state changes, and richer metadata are not fully synced.
+- Change detection/pull is not incremental (cursor-based); reconciliation of edge cases (rename/move, multi-device races) is evolving.
+- API shapes vary by Memos version; auto-detection covers common `/api` vs `/api/v1` layouts but edge cases may require `MEMOS_API_PATH` or `MEMOS_DEBUG=1` diagnostics.
 
 ## 7. Makefile & Maintenance
 

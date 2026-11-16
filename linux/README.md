@@ -1,6 +1,6 @@
 # Linux quick-capture & sync (Phase 5/6 foundation)
 
-Unified `memos` CLI with local per-note mirror (`notes/*.md` + frontmatter), outbound queue, and Memos API sync (pull/list/read/create/edit). Implements PRD v0.2 foundation.
+Unified `memos` CLI with local per-note mirror (`notes/*.md` + frontmatter), outbound queue, and Memos API sync (pull/list/read/create/edit/delete). Implements PRD v0.2 foundation (hardening in progress).
 
 ## Requirements
 
@@ -44,7 +44,8 @@ memos pull                 # pull remote memos into local mirror
 memos list                 # list local mirror (or --remote)
 memos read <ref>           # show note (uid/name/prefix)
 memos edit <ref>           # edit in $EDITOR and push update
-memos sync                 # flush outbound queue + pull
+memos rm <ref>             # delete note (alias: delete)
+memos sync                 # push dirty + flush outbound queue + pull
 memos flush                # flush/push outbound queue only
 memos completion zsh       # source <(memos completion zsh)
 
@@ -61,5 +62,7 @@ memos completion zsh       # source <(memos completion zsh)
 
 ## Notes
 
-- `memos sync` = push queued ops then pull (bidirectional foundation). Delete/conflict policy and richer reconciliation are evolving (see PRD v0.2).
-- API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` if needed.
+- `memos sync` = push dirty notes + flush queued ops (create/update/delete) + pull (bidirectional foundation).
+- Delete propagation: `memos rm` deletes locally+remotely (or queues); `pull` removes locally if a previously-synced remote note is gone (keeps local and marks conflict if locally modified).
+- Conflict handling: concurrent edits may keep local and save remote as `*.remote-conflict-*` (no merge UI yet). Sync scope (tags/pin/attachments/visibility/state) and incremental reconciliation are still evolving (see PRD v0.2).
+- API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` and/or `MEMOS_DEBUG=1` if needed.

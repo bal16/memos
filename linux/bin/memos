@@ -33,9 +33,11 @@ Usage:
   memos list [--remote]      List notes (local mirror by default)
   memos read <ref>           Show a note (uid/name/filename/prefix match)
   memos edit <ref>           Edit a note locally and push update
+  memos rm <ref>             Delete a note (alias: delete)
   memos pull                 Pull remote memos into local mirror
   memos push                 Push pending local changes (queue) and sync
   memos sync                 Reconcile: flush queue/push then pull
+  memos flush                Flush offline queue to remote
 
   memos completion <shell>   Print shell completion script (bash|zsh|fish)
   memos help|-h|--help       Show this help
@@ -444,6 +446,24 @@ api_list_memos() {
   printf ']'
 }
 
+api_delete_memo() {
+  local name="$1"
+  local uid
+  uid="$(memo_uid_from_name "$name")"
+  if api_try "DELETE" "/${name}" ""; then
+    printf '%s' "${REPLY_BODY:-}"
+    return 0
+  fi
+  if [[ -n "$uid" && "$uid" != "$name" ]]; then
+    if api_try "DELETE" "/memos/${uid}" ""; then
+      printf '%s' "${REPLY_BODY:-}"
+      return 0
+    fi
+  fi
+  debug "delete failed code=${REPLY_CODE:-}"
+  return 1
+}
+
 pull_memos() {
   ensure_dirs
   require_auth
@@ -454,8 +474,10 @@ pull_memos() {
     echo "Failed to list memos from API (code=${REPLY_CODE:-?}). Set MEMOS_DEBUG=1 for details." >&2
     return 1
   fi
-  local count i=0 pulled=0 conflicts=0 skipped=0
+  local count i=0 pulled=0 conflicts=0 skipped=0 deleted=0
   count=$(printf '%s' "$all" | jq 'length')
+  # track seen remote uids
+  declare -A seen_remote=()
   while [[ $i -lt $count ]]; do
     local m uid name content vis ctime utime mstate file st_synced st_remote cur_hash conflict_file ts remote_hash
     m=$(printf '%s' "$all" | jq -c ".[$i]" | normalize_memo_json)
@@ -470,6 +492,7 @@ pull_memos() {
       i=$((i + 1))
       continue
     fi
+    seen_remote["$uid"]=1
     file="$MIRROR_DIR/$(slug_uid "$uid").md"
     st_synced=$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
     st_remote=$(jq -r --arg uid "$uid" '.notes[$uid].remoteUpdateTime // ""' "$STATE_FILE" 2> /dev/null || echo "")
@@ -523,7 +546,37 @@ pull_memos() {
     fi
     i=$((i + 1))
   done
-  echo "Pulled $count memos: updated=$pulled conflicts=$conflicts unchanged=$skipped" >&2
+
+  # detect remote deletions: notes in state that were synced from remote but missing remotely
+  while IFS= read -r uid; do
+    [[ -z "$uid" ]] && continue
+    [[ -n "${seen_remote[$uid]+x}" ]] && continue
+    local st_name st_file st_synced cur_hash
+    st_name=$(jq -r --arg uid "$uid" '.notes[$uid].name // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    st_file=$(jq -r --arg uid "$uid" '.notes[$uid].file // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    st_synced=$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    [[ -z "$st_file" ]] && st_file="$MIRROR_DIR/$(slug_uid "$uid").md"
+    [[ "$st_name" == memos/* ]] || continue
+    if [[ -f "$st_file" ]]; then
+      cur_hash="$(file_hash "$st_file")"
+      if [[ "$cur_hash" == "$st_synced" || -z "$st_synced" ]]; then
+        rm -f "$st_file"
+        state_remove_note "$uid"
+        deleted=$((deleted + 1))
+        echo "Removed locally (deleted remotely): $uid" >&2
+      else
+        # local modified but remote deleted -> conflict, keep local and mark
+        jq --arg uid "$uid" '.notes[$uid] = ((.notes[$uid] // {}) + {conflict:true, remoteDeleted:true})' \
+          "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        conflicts=$((conflicts + 1))
+        echo "Conflict: $uid deleted remotely but modified locally -> kept local" >&2
+      fi
+    else
+      state_remove_note "$uid"
+    fi
+  done < <(jq -r '.notes | keys[]' "$STATE_FILE" 2> /dev/null)
+
+  echo "Pulled $count memos: updated=$pulled deleted=$deleted conflicts=$conflicts unchanged=$skipped" >&2
   [[ $conflicts -eq 0 ]]
 }
 
@@ -805,6 +858,27 @@ flush_queue() {
           fail=$((fail + 1))
         fi
         ;;
+      delete)
+        local name uid
+        name=$(printf '%s' "$line" | jq -r '.payload.name // empty')
+        uid=$(printf '%s' "$line" | jq -r '.payload.uid // empty')
+        [[ -z "$uid" && -n "$name" ]] && uid="$(memo_uid_from_name "$name")"
+        if [[ -n "$name" && "$name" == memos/* ]] && api_delete_memo "$name" > /dev/null 2>&1; then
+          [[ -n "$uid" ]] && state_remove_note "$uid"
+          [[ -n "$uid" && -f "$MIRROR_DIR/$(slug_uid "$uid").md" ]] && rm -f "$MIRROR_DIR/$(slug_uid "$uid").md"
+          ok=$((ok + 1))
+        else
+          # if already gone (404), treat as success
+          if [[ "${REPLY_CODE:-}" == "404" ]]; then
+            [[ -n "$uid" ]] && state_remove_note "$uid"
+            [[ -n "$uid" && -f "$MIRROR_DIR/$(slug_uid "$uid").md" ]] && rm -f "$MIRROR_DIR/$(slug_uid "$uid").md"
+            ok=$((ok + 1))
+          else
+            printf '%s\n' "$line" >> "$tmp"
+            fail=$((fail + 1))
+          fi
+        fi
+        ;;
       *)
         printf '%s\n' "$line" >> "$tmp"
         fail=$((fail + 1))
@@ -826,6 +900,47 @@ cmd_sync() {
   return $rc
 }
 
+delete_note() {
+  local ref="${1:-}"
+  [[ -n "$ref" ]] || die "Usage: memos rm <ref>"
+  ensure_dirs
+  need_tools
+  local file uid name
+  file=$(resolve_ref_file "$ref") || die "Note not found in local mirror: $ref"
+  read_mirror_file "$file" || die "Failed to read mirror file: $file"
+  uid="$RM_UID"
+  name="${RM_NAME:-memos/$uid}"
+
+  # remove local artifacts
+  rm -f "$file"
+  rm -f "$MIRROR_DIR/${uid}.remote-conflict-"*.md 2> /dev/null || true
+
+  if [[ "$name" == memos/* && -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1; then
+    if api_delete_memo "$name" > /dev/null 2>&1; then
+      state_remove_note "$uid"
+      notify "Deleted ($uid)"
+      echo "Deleted $uid"
+      return 0
+    elif [[ "${REPLY_CODE:-}" == "404" ]]; then
+      state_remove_note "$uid"
+      notify "Deleted locally (already gone remotely: $uid)"
+      echo "Deleted locally ($uid, remote already gone)"
+      return 0
+    fi
+  fi
+
+  if [[ "$name" == memos/* ]]; then
+    state_remove_note "$uid"
+    enqueue_op "delete" "$(jq -n --arg name "$name" --arg uid "$uid" '{name:$name, uid:$uid}')" || true
+    notify "Deleted locally (queued remote delete)"
+    echo "Deleted locally, queued remote delete ($uid)"
+  else
+    state_remove_note "$uid"
+    notify "Deleted locally ($uid)"
+    echo "Deleted locally ($uid)"
+  fi
+}
+
 print_completion() {
   local shell="${1:-}"
   case "$shell" in
@@ -834,7 +949,7 @@ print_completion() {
 _memos_completions() {
   local cur prev words cword
   _init_completion -s || return
-  local subcmds="new add quick sync flush list read edit pull push completion help"
+  local subcmds="new add quick sync flush list read edit rm delete pull push completion help"
   if [[ $cword -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${subcmds} -h --help" -- "$cur") )
     return
@@ -869,6 +984,8 @@ _memos() {
     'list:List notes (local mirror or --remote)'
     'read:Read a note by id/name'
     'edit:Edit a note and push update'
+    'rm:Delete a note'
+    'delete:Delete a note (alias)'
     'pull:Pull remote memos into local mirror'
     'push:Flush/push pending local changes'
     'sync:Reconcile (push queue + pull)'
@@ -890,7 +1007,7 @@ _memos() {
       case $words[1] in
         completion) _values 'shell' bash zsh fish ;;
         list) _values 'opts' '--remote[List from API]' ;;
-        read|edit)
+        read|edit|rm|delete)
           local -a notes
           local ndir="${MEMOS_NOTES_DIR:-$HOME/notes/memos}/notes"
           [[ -d "$ndir" ]] && notes=(${ndir}/*.md(:t:r))
@@ -914,6 +1031,8 @@ complete -c memos -n "__fish_use_subcommand" -a "quick" -d "Alias for quick-crea
 complete -c memos -n "__fish_use_subcommand" -a "list" -d "List notes"
 complete -c memos -n "__fish_use_subcommand" -a "read" -d "Read a note"
 complete -c memos -n "__fish_use_subcommand" -a "edit" -d "Edit a note and push update"
+complete -c memos -n "__fish_use_subcommand" -a "rm" -d "Delete a note"
+complete -c memos -n "__fish_use_subcommand" -a "delete" -d "Delete a note (alias)"
 complete -c memos -n "__fish_use_subcommand" -a "pull" -d "Pull remote memos into local mirror"
 complete -c memos -n "__fish_use_subcommand" -a "push" -d "Push pending local changes"
 complete -c memos -n "__fish_use_subcommand" -a "sync" -d "Reconcile (push + pull)"
@@ -969,6 +1088,11 @@ main() {
     edit)
       shift
       edit_note "${1:-}"
+      exit 0
+      ;;
+    rm | delete)
+      shift
+      delete_note "${1:-}"
       exit 0
       ;;
     completion)
