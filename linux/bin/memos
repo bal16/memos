@@ -457,7 +457,7 @@ pull_memos() {
   local count i=0 pulled=0 conflicts=0 skipped=0
   count=$(printf '%s' "$all" | jq 'length')
   while [[ $i -lt $count ]]; do
-    local m uid name content vis ctime utime mstate file st_synced st_remote cur_hash conflict_file ts
+    local m uid name content vis ctime utime mstate file st_synced st_remote cur_hash conflict_file ts remote_hash
     m=$(printf '%s' "$all" | jq -c ".[$i]" | normalize_memo_json)
     uid=$(printf '%s' "$m" | json_get '.uid')
     name=$(printf '%s' "$m" | json_get '.name')
@@ -478,13 +478,14 @@ pull_memos() {
     else
       cur_hash=""
     fi
+    remote_hash="$(content_hash "$content")"
 
     if [[ ! -f "$file" ]]; then
       write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
       pulled=$((pulled + 1))
     elif [[ "$cur_hash" == "$st_synced" || -z "$st_synced" ]]; then
       # local clean (or unknown baseline): take remote if different
-      if [[ "$cur_hash" != "$(content_hash "$content")" || "$utime" != "$st_remote" ]]; then
+      if [[ "$cur_hash" != "$remote_hash" || "$utime" != "$st_remote" ]]; then
         write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
         pulled=$((pulled + 1))
       else
@@ -492,15 +493,15 @@ pull_memos() {
       fi
     else
       # local modified since last sync
-      if [[ "$utime" == "$st_remote" || -z "$st_remote" ]]; then
-        # remote unchanged, keep local (pending push)
+      if [[ "$remote_hash" == "$st_synced" && "$utime" == "$st_remote" ]]; then
+        # remote unchanged from baseline, keep local (pending push)
         skipped=$((skipped + 1))
-      elif [[ "$cur_hash" == "$(content_hash "$content")" ]]; then
-        # same content, just refresh metadata/state
+      elif [[ "$remote_hash" == "$cur_hash" ]]; then
+        # converged content: refresh metadata/state as synced
         write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
         pulled=$((pulled + 1))
-      else
-        # CONFLICT: both changed -> keep local, save remote as conflict copy
+      elif [[ "$remote_hash" != "$st_synced" || "$utime" != "$st_remote" ]]; then
+        # CONFLICT: both changed (by content and/or timestamp) -> keep local, save remote as conflict copy
         ts="$(date -u +%Y%m%dT%H%M%SZ)"
         conflict_file="$MIRROR_DIR/$(slug_uid "$uid").remote-conflict-${ts}.md"
         {
@@ -516,6 +517,8 @@ pull_memos() {
           "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
         conflicts=$((conflicts + 1))
         echo "Conflict: $uid -> kept local, saved remote to $conflict_file" >&2
+      else
+        skipped=$((skipped + 1))
       fi
     fi
     i=$((i + 1))
