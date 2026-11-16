@@ -67,8 +67,9 @@ memos read <ref>           # show note (uid, name, filename, or prefix match)
 memos edit <ref>           # edit in $EDITOR and push update (or queue)
 memos rm <ref>             # delete note locally and remotely (alias: delete)
 
-memos sync                 # reconcile: push dirty + flush queue + pull
-memos flush                # flush/push outbound queue only (alias: push)
+memos push                 # push local changes (dirty notes + queue), no pull
+memos sync                 # reconcile: push local changes + pull
+memos flush                # flush outbound queue only
 
 memos completion <shell>   # bash|zsh|fish
 memos help
@@ -108,7 +109,7 @@ memos completion fish | source
 - **List/Read:** `memos list` reads local mirror; `memos read <ref>` resolves by uid/name/filename/prefix from mirror.
 - **Edit:** `memos edit <ref>` opens content in `$EDITOR`; on change updates local mirror and attempts API update (`PATCH`), else queues `update` op.
 - **Delete:** `memos rm <ref>` (or `delete`) removes the note locally and attempts remote delete (`DELETE`), else queues a `delete` op. `memos pull` detects notes deleted remotely (that were previously synced): removes them locally if clean, but keeps local copy and marks conflict (`remoteDeleted`) if locally modified.
-- **Sync:** `memos sync` = push dirty notes + `flush` (queued ops, incl. delete) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
+- **Push/Flush/Sync:** `memos push` = detect/push dirty mirror notes + flush outbound queue (no pull). `memos flush` = flush outbound queue only. `memos sync` = push local changes (`push_dirty_notes` + queue) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
 
 ### Legacy daily logs
 Earlier create-only flow appended to `~/notes/memos/YYYY-MM-DD.md` (`## HH:MM` entries) without recording remote IDs. These **legacy logs are not auto-migrated/mapped** into the per-note mirror (to avoid duplicates/ambiguous matching). Recommended: run `memos pull` to build the canonical mirror from cloud; keep old daily files as archive/reference (move aside if desired) and use `notes/*.md` as the working mirror going forward.

@@ -35,9 +35,9 @@ Usage:
   memos edit <ref>           Edit a note locally and push update
   memos rm <ref>             Delete a note (alias: delete)
   memos pull                 Pull remote memos into local mirror
-  memos push                 Push pending local changes (queue) and sync
-  memos sync                 Reconcile: flush queue/push then pull
-  memos flush                Flush offline queue to remote
+  memos push                 Push local changes (dirty notes + queue), no pull
+  memos sync                 Reconcile: push local changes + pull
+  memos flush                Flush outbound queue only
 
   memos completion <shell>   Print shell completion script (bash|zsh|fish)
   memos help|-h|--help       Show this help
@@ -214,7 +214,7 @@ file_hash() {
   }
   # hash of content body (without frontmatter) for stable comparison
   local content
-  content="$(sed '1{/^---$/!b};1,/^---$/d' "$file" 2> /dev/null || cat "$file")"
+  content="$(sed '1{/^---$/!b};1,/^---$/d' "$file" 2> /dev/null | tr -d '\r' || tr -d '\r' < "$file")"
   # trim single leading blank line after frontmatter like read_mirror_file
   if [[ "${content:0:1}" == $'\n' ]]; then content="${content#?}"; fi
   content="${content%$'\n'}"
@@ -253,7 +253,7 @@ write_mirror_file() {
 }
 
 read_mirror_file() {
-  # sets RM_NAME RM_UID RM_VIS RM_CREATE RM_UPDATE RM_STATE RM_CONTENT
+  # sets: RM_NAME RM_UID RM_VIS RM_CREATE RM_UPDATE RM_STATE RM_CONTENT
   local file="$1"
   RM_NAME=""
   RM_UID=""
@@ -263,9 +263,10 @@ read_mirror_file() {
   RM_STATE=""
   RM_CONTENT=""
   [[ -f "$file" ]] || return 1
-  local in_meta=0 seen=0 line
+  local in_meta=0 seen=0 line key val
   local content=""
   while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
     if [[ $seen -eq 0 && "$line" == "---" ]]; then
       in_meta=1
       seen=1
@@ -277,13 +278,17 @@ read_mirror_file() {
       continue
     fi
     if [[ $in_meta -eq 1 ]]; then
-      case "$line" in
-        name:*) RM_NAME="${line#name: }" ;;
-        uid:*) RM_UID="${line#uid: }" ;;
-        visibility:*) RM_VIS="${line#visibility: }" ;;
-        createTime:*) RM_CREATE="${line#createTime: }" ;;
-        updateTime:*) RM_UPDATE="${line#updateTime: }" ;;
-        state:*) RM_STATE="${line#state: }" ;;
+      key="${line%%:*}"
+      val="${line#*:}"
+      val="${val#"${val%%[![:space:]]*}"}"
+      val="${val%"${val##*[![:space:]]}"}"
+      case "$key" in
+        name) RM_NAME="$val" ;;
+        uid) RM_UID="$val" ;;
+        visibility) RM_VIS="$val" ;;
+        createTime) RM_CREATE="$val" ;;
+        updateTime) RM_UPDATE="$val" ;;
+        state) RM_STATE="$val" ;;
       esac
       continue
     fi
@@ -891,6 +896,14 @@ flush_queue() {
   [[ $fail -eq 0 ]]
 }
 
+cmd_push() {
+  ensure_dirs
+  local rc=0
+  push_dirty_notes || rc=$?
+  flush_queue || rc=$?
+  return $rc
+}
+
 cmd_sync() {
   ensure_dirs
   local rc=0
@@ -959,7 +972,7 @@ _memos_completions() {
     completion)
       [[ $cword -eq 2 ]] && COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
       ;;
-    read|edit)
+    read | edit | rm | delete)
       if [[ -d "${MEMOS_NOTES_DIR:-$HOME/notes/memos}/notes" ]]; then
         local files
         files=$(cd "${MEMOS_NOTES_DIR:-$HOME/notes/memos}/notes" 2>/dev/null && ls *.md 2>/dev/null | sed 's/\.md$//')
@@ -987,9 +1000,9 @@ _memos() {
     'rm:Delete a note'
     'delete:Delete a note (alias)'
     'pull:Pull remote memos into local mirror'
-    'push:Flush/push pending local changes'
-    'sync:Reconcile (push queue + pull)'
-    'flush:Flush offline queue'
+    'push:Push local changes (dirty + queue)'
+    'sync:Reconcile (push local + pull)'
+    'flush:Flush outbound queue only'
     'completion:Print shell completion script'
     'help:Show help'
   )
@@ -1034,9 +1047,9 @@ complete -c memos -n "__fish_use_subcommand" -a "edit" -d "Edit a note and push 
 complete -c memos -n "__fish_use_subcommand" -a "rm" -d "Delete a note"
 complete -c memos -n "__fish_use_subcommand" -a "delete" -d "Delete a note (alias)"
 complete -c memos -n "__fish_use_subcommand" -a "pull" -d "Pull remote memos into local mirror"
-complete -c memos -n "__fish_use_subcommand" -a "push" -d "Push pending local changes"
-complete -c memos -n "__fish_use_subcommand" -a "sync" -d "Reconcile (push + pull)"
-complete -c memos -n "__fish_use_subcommand" -a "flush" -d "Flush offline queue"
+complete -c memos -n "__fish_use_subcommand" -a "push" -d "Push local changes (dirty + queue)"
+complete -c memos -n "__fish_use_subcommand" -a "sync" -d "Reconcile (push local + pull)"
+complete -c memos -n "__fish_use_subcommand" -a "flush" -d "Flush outbound queue only"
 complete -c memos -n "__fish_use_subcommand" -a "completion" -d "Print shell completion script"
 complete -c memos -n "__fish_use_subcommand" -a "help" -d "Show help"
 complete -c memos -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
@@ -1067,7 +1080,11 @@ main() {
       cmd_sync
       exit $?
       ;;
-    flush | push)
+    push)
+      cmd_push
+      exit $?
+      ;;
+    flush)
       flush_queue
       exit $?
       ;;

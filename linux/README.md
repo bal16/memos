@@ -45,8 +45,9 @@ memos list                 # list local mirror (or --remote)
 memos read <ref>           # show note (uid/name/prefix)
 memos edit <ref>           # edit in $EDITOR and push update
 memos rm <ref>             # delete note (alias: delete)
-memos sync                 # push dirty + flush outbound queue + pull
-memos flush                # flush/push outbound queue only
+memos push                 # push local changes (dirty notes + queue), no pull
+memos sync                 # push local changes + pull
+memos flush                # flush outbound queue only
 memos completion zsh       # source <(memos completion zsh)
 
 # Compatibility wrappers: memo-nvim, memo-quick
@@ -56,13 +57,13 @@ memos completion zsh       # source <(memos completion zsh)
 
 - `~/notes/memos/notes/<uid>.md` — **one file per memo** with YAML frontmatter (`name`, `uid`, `visibility`, `createTime`, `updateTime`, `state`) and content body.
 - `~/notes/memos/.sync/state.json` — sync state/id mapping.
-- `~/notes/memos/.queue.jsonl` — outbound operation queue (create/update when offline or on failure).
+- `~/notes/memos/.queue.jsonl` — outbound operation queue (create/update/delete when offline or on failure).
 
 **Recommendation/design (Phase 5/6):** per-note mirror files (stable ID mapping) are the canonical local representation for sync/edit. New captures create mirror files. Run `memos pull` to populate mirror from cloud (authoritative). Existing legacy daily logs `YYYY-MM-DD.md` (append-only, pre-mirror) are **not** auto-migrated/mapped to remote IDs (to avoid duplicates); keep them as archive/reference if present.
 
 ## Notes
 
-- `memos sync` = push dirty notes + flush queued ops (create/update/delete) + pull (bidirectional foundation).
+- `memos push` = detect/push dirty mirror notes + flush queued ops (no pull). `memos flush` = flush queued ops only. `memos sync` = push local changes + pull (bidirectional foundation).
 - Delete propagation: `memos rm` deletes locally+remotely (or queues); `pull` removes locally if a previously-synced remote note is gone (keeps local and marks conflict if locally modified).
 - Conflict handling: concurrent edits may keep local and save remote as `*.remote-conflict-*` (no merge UI yet). Sync scope (tags/pin/attachments/visibility/state) and incremental reconciliation are still evolving (see PRD v0.2).
 - API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` and/or `MEMOS_DEBUG=1` if needed.
