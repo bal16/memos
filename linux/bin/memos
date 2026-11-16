@@ -34,6 +34,9 @@ Usage:
   memos read <ref>           Show a note (uid/name/filename/prefix match)
   memos edit <ref>           Edit a note locally and push update
   memos rm <ref>             Delete a note (alias: delete)
+  memos conflicts            List notes with sync conflicts
+  memos resolve <ref> --keep-local|--keep-remote
+                             Resolve a conflict (push local or take remote)
   memos pull                 Pull remote memos into local mirror
   memos push                 Push local changes (dirty notes + queue), no pull
   memos sync                 Reconcile: push local changes + pull
@@ -176,13 +179,14 @@ state_get_note() {
 }
 
 state_upsert_note() {
-  # args: uid name file remoteUpdateTime syncedHash [dirty]
-  local uid="$1" name="$2" file="$3" update="$4" hash="$5" dirty="${6:-false}"
+  # args: uid name file remoteUpdateTime syncedContentHash [dirty] [syncedMetaHash]
+  local uid="$1" name="$2" file="$3" update="$4" hash="$5" dirty="${6:-false}" meta_hash="${7:-}"
+  # backward compat: if state had old syncedHash field, keep it aligned to content hash
   local tmp
   tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
   jq --arg uid "$uid" --arg name "$name" --arg file "$file" --arg update "$update" --arg hash "$hash" \
-    --argjson dirty "$dirty" \
-    '.notes[$uid] = ((.notes[$uid] // {}) + {name:$name,file:$file,remoteUpdateTime:$update,syncedHash:$hash,dirty:$dirty})' \
+    --arg mh "$meta_hash" --argjson dirty "$dirty" \
+    '.notes[$uid] = ((.notes[$uid] // {}) + {name:$name,file:$file,remoteUpdateTime:$update,syncedHash:$hash,syncedContentHash:$hash,syncedMetaHash:$mh,dirty:$dirty})' \
     "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 
@@ -206,25 +210,55 @@ content_hash() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
-file_hash() {
+meta_string() {
+  # args: visibility state pinned tags
+  local visibility="${1:-PRIVATE}" mstate="${2:-NORMAL}" pinned="${3:-false}" tags="${4:-}"
+  printf 'visibility=%s\nstate=%s\npinned=%s\ntags=%s\n' "$visibility" "$mstate" "$pinned" "$tags"
+}
+
+meta_hash() {
+  meta_string "$1" "$2" "$3" "$4" | sha256sum | awk '{print $1}'
+}
+
+tags_to_line() {
+  # stdin: json array or empty -> comma-separated
+  jq -r 'if type=="array" then map(tostring) | join(",") elif type=="string" then . else "" end' 2> /dev/null || echo ""
+}
+
+file_content_hash() {
   local file="$1"
   [[ -f "$file" ]] || {
     echo ""
     return 0
   }
-  # hash of content body (without frontmatter) for stable comparison
   local content
   content="$(sed '1{/^---$/!b};1,/^---$/d' "$file" 2> /dev/null | tr -d '\r' || tr -d '\r' < "$file")"
-  # trim single leading blank line after frontmatter like read_mirror_file
   if [[ "${content:0:1}" == $'\n' ]]; then content="${content#?}"; fi
   content="${content%$'\n'}"
   content_hash "$content"
 }
 
+file_hash() { # backward-compatible alias (content hash)
+  file_content_hash "$1"
+}
+
+file_meta_hash() {
+  local file="$1"
+  [[ -f "$file" ]] || {
+    echo ""
+    return 0
+  }
+  read_mirror_file "$file" || {
+    echo ""
+    return 0
+  }
+  meta_hash "${RM_VIS:-PRIVATE}" "${RM_STATE:-NORMAL}" "${RM_PINNED:-false}" "${RM_TAGS:-}"
+}
+
 write_mirror_file() {
-  # args: uid name visibility create update state content [mark_synced:true|false]
-  local uid="$1" name="$2" visibility="$3" create="$4" update="$5" mstate="$6" content="$7" mark_synced="${8:-true}"
-  local file tmp dirty=false
+  # args: uid name visibility create update state content [mark_synced:true|false] [pinned] [tags]
+  local uid="$1" name="$2" visibility="$3" create="$4" update="$5" mstate="$6" content="$7" mark_synced="${8:-true}" pinned="${9:-false}" tags="${10:-}"
+  local file tmp
   file="$MIRROR_DIR/$(slug_uid "$uid").md"
   tmp="$(mktemp "$file.XXXXXX")"
   {
@@ -232,28 +266,32 @@ write_mirror_file() {
     printf 'name: %s\n' "$name"
     printf 'uid: %s\n' "$uid"
     printf 'visibility: %s\n' "${visibility:-PRIVATE}"
+    printf 'state: %s\n' "${mstate:-NORMAL}"
+    printf 'pinned: %s\n' "${pinned:-false}"
+    printf 'tags: %s\n' "${tags:-}"
     printf 'createTime: %s\n' "${create:-}"
     printf 'updateTime: %s\n' "${update:-}"
-    printf 'state: %s\n' "${mstate:-NORMAL}"
     printf '%s\n\n' "---"
     printf '%s' "$content"
     [[ "$content" == *$'\n' ]] || printf '\n'
   } > "$tmp"
   mv "$tmp" "$file"
   if [[ "$mark_synced" == "true" ]]; then
-    state_upsert_note "$uid" "$name" "$file" "$update" "$(content_hash "$content")" false
+    state_upsert_note "$uid" "$name" "$file" "$update" "$(content_hash "$content")" false "$(meta_hash "${visibility:-PRIVATE}" "${mstate:-NORMAL}" "${pinned:-false}" "${tags:-}")"
   else
-    # local change not yet synced: keep remoteUpdateTime from state if any, mark dirty
-    local prev_update
+    # local change not yet synced: keep remote baseline hashes/times if any, mark dirty
+    local prev_update prev_ch prev_mh
     prev_update=$(jq -r --arg uid "$uid" '.notes[$uid].remoteUpdateTime // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    prev_ch=$(jq -r --arg uid "$uid" '(.notes[$uid].syncedContentHash // .notes[$uid].syncedHash // "")' "$STATE_FILE" 2> /dev/null || echo "")
+    prev_mh=$(jq -r --arg uid "$uid" '.notes[$uid].syncedMetaHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
     [[ -z "$prev_update" ]] && prev_update="$update"
-    state_upsert_note "$uid" "$name" "$file" "$prev_update" "$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")" true
+    state_upsert_note "$uid" "$name" "$file" "$prev_update" "$prev_ch" true "$prev_mh"
   fi
   printf '%s\n' "$file"
 }
 
 read_mirror_file() {
-  # sets: RM_NAME RM_UID RM_VIS RM_CREATE RM_UPDATE RM_STATE RM_CONTENT
+  # sets: RM_NAME RM_UID RM_VIS RM_CREATE RM_UPDATE RM_STATE RM_PINNED RM_TAGS RM_CONTENT
   local file="$1"
   RM_NAME=""
   RM_UID=""
@@ -261,6 +299,8 @@ read_mirror_file() {
   RM_CREATE=""
   RM_UPDATE=""
   RM_STATE=""
+  RM_PINNED="false"
+  RM_TAGS=""
   RM_CONTENT=""
   [[ -f "$file" ]] || return 1
   local in_meta=0 seen=0 line key val
@@ -289,6 +329,8 @@ read_mirror_file() {
         createTime) RM_CREATE="$val" ;;
         updateTime) RM_UPDATE="$val" ;;
         state) RM_STATE="$val" ;;
+        pinned) RM_PINNED="$val" ;;
+        tags) RM_TAGS="$val" ;;
       esac
       continue
     fi
@@ -301,6 +343,9 @@ read_mirror_file() {
   RM_CONTENT="${content%$'\n'}"
   [[ -n "$RM_UID" ]] || RM_UID="$(basename "$file" .md)"
   [[ -n "$RM_NAME" ]] || RM_NAME="memos/$RM_UID"
+  [[ -n "$RM_VIS" ]] || RM_VIS="PRIVATE"
+  [[ -n "$RM_STATE" ]] || RM_STATE="NORMAL"
+  [[ -n "$RM_PINNED" ]] || RM_PINNED="false"
 }
 
 resolve_ref_file() {
@@ -354,7 +399,8 @@ normalize_memo_json() {
     createTime: (.createTime // .create_time // .displayTime // .display_time // ""),
     updateTime: (.updateTime // .update_time // .displayTime // .display_time // ""),
     state: (.state // "NORMAL"),
-    pinned: (.pinned // false)
+    pinned: (if (.pinned == true) then "true" else "false" end),
+    tags: (if (.tags | type) == "array" then (.tags | map(tostring) | join(",")) else (.tags // "" | tostring) end)
   }'
 }
 
@@ -378,34 +424,51 @@ api_create_memo() {
 }
 
 api_update_memo() {
-  local name="$1" content="$2" visibility="${3:-PRIVATE}"
-  local payload resp uid
+  local name="$1" content="$2" visibility="${3:-PRIVATE}" mstate="${4:-NORMAL}" pinned="${5:-false}"
+  local payload uid mask
   uid="$(memo_uid_from_name "$name")"
+  # normalize pinned to json bool
+  local pinned_json=false
+  [[ "$pinned" == "true" ]] && pinned_json=true
+  mask="content,visibility,state,pinned"
+  payload=$(jq -n --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --argjson pinned "$pinned_json" \
+    '{content:$content, visibility:$visibility, state:$state, pinned:$pinned}')
   # variant 1: PATCH /{name} with updateMask query, flat body
-  payload=$(jq -n --arg content "$content" --arg visibility "$visibility" '{content:$content, visibility:$visibility}')
-  if api_try "PATCH" "/${name}?updateMask=content,visibility" "$payload"; then
+  if api_try "PATCH" "/${name}?updateMask=${mask}" "$payload"; then
     printf '%s' "$REPLY_BODY"
     return 0
   fi
   # variant 2: snake_case update_mask
-  if api_try "PATCH" "/${name}?update_mask=content,visibility" "$payload"; then
+  if api_try "PATCH" "/${name}?update_mask=${mask}" "$payload"; then
     printf '%s' "$REPLY_BODY"
     return 0
   fi
   # variant 3: wrapped memo + updateMask in body
-  payload=$(jq -n --arg name "$name" --arg content "$content" --arg visibility "$visibility" \
-    '{memo:{name:$name, content:$content, visibility:$visibility}, updateMask:"content,visibility"}')
+  payload=$(jq -n --arg name "$name" --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --argjson pinned "$pinned_json" \
+    '{memo:{name:$name, content:$content, visibility:$visibility, state:$state, pinned:$pinned}, updateMask:"content,visibility,state,pinned"}')
   if api_try "PATCH" "/${name}" "$payload"; then
     printf '%s' "$REPLY_BODY"
     return 0
   fi
-  # variant 4: PATCH /memos/{uid} (some versions)
-  payload=$(jq -n --arg content "$content" --arg visibility "$visibility" '{content:$content, visibility:$visibility}')
+  # variant 4: PATCH /memos/{uid}
+  payload=$(jq -n --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --argjson pinned "$pinned_json" \
+    '{content:$content, visibility:$visibility, state:$state, pinned:$pinned}')
   if [[ -n "$uid" && "$uid" != "$name" ]]; then
-    if api_try "PATCH" "/memos/${uid}?updateMask=content,visibility" "$payload"; then
+    if api_try "PATCH" "/memos/${uid}?updateMask=${mask}" "$payload"; then
       printf '%s' "$REPLY_BODY"
       return 0
     fi
+  fi
+  # fallback: content+visibility only (older API compat)
+  mask="content,visibility"
+  payload=$(jq -n --arg content "$content" --arg visibility "$visibility" '{content:$content, visibility:$visibility}')
+  if api_try "PATCH" "/${name}?updateMask=${mask}" "$payload"; then
+    printf '%s' "$REPLY_BODY"
+    return 0
+  fi
+  if api_try "PATCH" "/${name}?update_mask=${mask}" "$payload"; then
+    printf '%s' "$REPLY_BODY"
+    return 0
   fi
   debug "update failed code=${REPLY_CODE:-}"
   return 1
@@ -484,7 +547,7 @@ pull_memos() {
   # track seen remote uids
   declare -A seen_remote=()
   while [[ $i -lt $count ]]; do
-    local m uid name content vis ctime utime mstate file st_synced st_remote cur_hash conflict_file ts remote_hash
+    local m uid name content vis ctime utime mstate rpinned rtags file st_synced_ch st_synced_mh st_remote cur_ch cur_mh conflict_file ts remote_ch remote_mh
     m=$(printf '%s' "$all" | jq -c ".[$i]" | normalize_memo_json)
     uid=$(printf '%s' "$m" | json_get '.uid')
     name=$(printf '%s' "$m" | json_get '.name')
@@ -493,49 +556,61 @@ pull_memos() {
     ctime=$(printf '%s' "$m" | json_get '.createTime')
     utime=$(printf '%s' "$m" | json_get '.updateTime')
     mstate=$(printf '%s' "$m" | json_get '.state')
+    rpinned=$(printf '%s' "$m" | json_get '.pinned')
+    rtags=$(printf '%s' "$m" | json_get '.tags')
     if [[ -z "$uid" ]]; then
       i=$((i + 1))
       continue
     fi
     seen_remote["$uid"]=1
     file="$MIRROR_DIR/$(slug_uid "$uid").md"
-    st_synced=$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    st_synced_ch=$(jq -r --arg uid "$uid" '(.notes[$uid].syncedContentHash // .notes[$uid].syncedHash // "")' "$STATE_FILE" 2> /dev/null || echo "")
+    st_synced_mh=$(jq -r --arg uid "$uid" '.notes[$uid].syncedMetaHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
     st_remote=$(jq -r --arg uid "$uid" '.notes[$uid].remoteUpdateTime // ""' "$STATE_FILE" 2> /dev/null || echo "")
     if [[ -f "$file" ]]; then
-      cur_hash="$(file_hash "$file")"
+      cur_ch="$(file_content_hash "$file")"
+      cur_mh="$(file_meta_hash "$file")"
     else
-      cur_hash=""
+      cur_ch=""
+      cur_mh=""
     fi
-    remote_hash="$(content_hash "$content")"
+    remote_ch="$(content_hash "$content")"
+    remote_mh="$(meta_hash "$vis" "$mstate" "$rpinned" "$rtags")"
 
     if [[ ! -f "$file" ]]; then
-      write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
+      write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true "$rpinned" "$rtags" > /dev/null
       pulled=$((pulled + 1))
-    elif [[ "$cur_hash" == "$st_synced" || -z "$st_synced" ]]; then
+    elif [[ "$cur_ch" == "$st_synced_ch" && "$cur_mh" == "$st_synced_mh" ]] || [[ -z "$st_synced_ch" && -z "$st_synced_mh" ]]; then
       # local clean (or unknown baseline): take remote if different
-      if [[ "$cur_hash" != "$remote_hash" || "$utime" != "$st_remote" ]]; then
-        write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
+      if [[ "$cur_ch" != "$remote_ch" || "$cur_mh" != "$remote_mh" || "$utime" != "$st_remote" ]]; then
+        write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true "$rpinned" "$rtags" > /dev/null
         pulled=$((pulled + 1))
       else
         skipped=$((skipped + 1))
       fi
     else
-      # local modified since last sync
-      if [[ "$remote_hash" == "$st_synced" && "$utime" == "$st_remote" ]]; then
+      # local modified since last sync (content and/or metadata)
+      local local_dirty_remote_same=false
+      if [[ "$remote_ch" == "$st_synced_ch" && "$remote_mh" == "$st_synced_mh" && "$utime" == "$st_remote" ]]; then
+        local_dirty_remote_same=true
+      elif [[ -z "$st_remote" && "$remote_ch" == "$st_synced_ch" && "$remote_mh" == "$st_synced_mh" ]]; then
+        local_dirty_remote_same=true
+      fi
+      if [[ "$local_dirty_remote_same" == "true" ]]; then
         # remote unchanged from baseline, keep local (pending push)
         skipped=$((skipped + 1))
-      elif [[ "$remote_hash" == "$cur_hash" ]]; then
-        # converged content: refresh metadata/state as synced
-        write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
+      elif [[ "$remote_ch" == "$cur_ch" && "$remote_mh" == "$cur_mh" ]]; then
+        # converged: refresh metadata/state as synced
+        write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true "$rpinned" "$rtags" > /dev/null
         pulled=$((pulled + 1))
-      elif [[ "$remote_hash" != "$st_synced" || "$utime" != "$st_remote" ]]; then
-        # CONFLICT: both changed (by content and/or timestamp) -> keep local, save remote as conflict copy
+      elif [[ "$remote_ch" != "$st_synced_ch" || "$remote_mh" != "$st_synced_mh" || "$utime" != "$st_remote" ]]; then
+        # CONFLICT: both changed -> keep local, save remote as conflict copy
         ts="$(date -u +%Y%m%dT%H%M%SZ)"
         conflict_file="$MIRROR_DIR/$(slug_uid "$uid").remote-conflict-${ts}.md"
         {
           printf '%s\n' "---"
           printf 'conflict: remote\n'
-          printf 'name: %s\nuid: %s\nvisibility: %s\ncreateTime: %s\nupdateTime: %s\nstate: %s\n' "$name" "$uid" "$vis" "$ctime" "$utime" "$mstate"
+          printf 'name: %s\nuid: %s\nvisibility: %s\nstate: %s\npinned: %s\ntags: %s\ncreateTime: %s\nupdateTime: %s\n' "$name" "$uid" "$vis" "$mstate" "$rpinned" "$rtags" "$ctime" "$utime"
           printf '%s\n\n' "---"
           printf '%s' "$content"
           [[ "$content" == *$'\n' ]] || printf '\n'
@@ -556,15 +631,17 @@ pull_memos() {
   while IFS= read -r uid; do
     [[ -z "$uid" ]] && continue
     [[ -n "${seen_remote[$uid]+x}" ]] && continue
-    local st_name st_file st_synced cur_hash
+    local st_name st_file st_synced_ch st_synced_mh cur_ch cur_mh
     st_name=$(jq -r --arg uid "$uid" '.notes[$uid].name // ""' "$STATE_FILE" 2> /dev/null || echo "")
     st_file=$(jq -r --arg uid "$uid" '.notes[$uid].file // ""' "$STATE_FILE" 2> /dev/null || echo "")
-    st_synced=$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    st_synced_ch=$(jq -r --arg uid "$uid" '(.notes[$uid].syncedContentHash // .notes[$uid].syncedHash // "")' "$STATE_FILE" 2> /dev/null || echo "")
+    st_synced_mh=$(jq -r --arg uid "$uid" '.notes[$uid].syncedMetaHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
     [[ -z "$st_file" ]] && st_file="$MIRROR_DIR/$(slug_uid "$uid").md"
     [[ "$st_name" == memos/* ]] || continue
     if [[ -f "$st_file" ]]; then
-      cur_hash="$(file_hash "$st_file")"
-      if [[ "$cur_hash" == "$st_synced" || -z "$st_synced" ]]; then
+      cur_ch="$(file_content_hash "$st_file")"
+      cur_mh="$(file_meta_hash "$st_file")"
+      if { [[ "$cur_ch" == "$st_synced_ch" || -z "$st_synced_ch" ]] && [[ "$cur_mh" == "$st_synced_mh" || -z "$st_synced_mh" ]]; }; then
         rm -f "$st_file"
         state_remove_note "$uid"
         deleted=$((deleted + 1))
@@ -632,7 +709,7 @@ enqueue_op() {
 }
 
 save_new_note() {
-  local content="$1" visibility="${2:-$MEMOS_VISIBILITY}"
+  local content="$1" visibility="${2:-$MEMOS_VISIBILITY}" mstate="${3:-NORMAL}" pinned="${4:-false}" tags="${5:-}"
   content="${content%$'\n'}"
   [[ -z "${content//[[:space:]]/}" ]] && die "Empty note, nothing to do."
   ensure_dirs
@@ -644,17 +721,19 @@ save_new_note() {
   fi
 
   if [[ -n "$created" ]]; then
-    local m uid name ctime utime vis mstate file
+    local m uid name ctime utime vis rmstate rpinned rtags file
     m=$(printf '%s' "$created" | normalize_memo_json)
     uid=$(printf '%s' "$m" | json_get '.uid')
     name=$(printf '%s' "$m" | json_get '.name')
     ctime=$(printf '%s' "$m" | json_get '.createTime')
     utime=$(printf '%s' "$m" | json_get '.updateTime')
     vis=$(printf '%s' "$m" | json_get '.visibility')
-    mstate=$(printf '%s' "$m" | json_get '.state')
+    rmstate=$(printf '%s' "$m" | json_get '.state')
+    rpinned=$(printf '%s' "$m" | json_get '.pinned')
+    rtags=$(printf '%s' "$m" | json_get '.tags')
     [[ -n "$uid" ]] || uid="local-$(date +%s)-$RANDOM"
     [[ -n "$name" ]] || name="memos/$uid"
-    file=$(write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true)
+    file=$(write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$rmstate" "$content" true "$rpinned" "$rtags")
     notify "Saved & synced ($uid)"
     echo "$file"
     return 0
@@ -663,9 +742,9 @@ save_new_note() {
   # offline/failure: local draft in mirror + queue create op (dirty)
   local tmpid file
   tmpid="local-$(date +%s)-$RANDOM"
-  file=$(write_mirror_file "$tmpid" "local/$tmpid" "$visibility" "$(now_iso)" "" "NORMAL" "$content" false)
+  file=$(write_mirror_file "$tmpid" "local/$tmpid" "$visibility" "$(now_iso)" "" "$mstate" "$content" false "$pinned" "$tags")
   if command -v jq > /dev/null 2>&1; then
-    enqueue_op "create" "$(jq -n --arg local_uid "$tmpid" --arg content "$content" --arg visibility "$visibility" '{local_uid:$local_uid, content:$content, visibility:$visibility}')" || true
+    enqueue_op "create" "$(jq -n --arg local_uid "$tmpid" --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --arg pinned "$pinned" --arg tags "$tags" '{local_uid:$local_uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" || true
   fi
   notify "Saved locally (queued for sync)"
   echo "$file"
@@ -735,22 +814,27 @@ edit_note() {
   rm -f "$tmp"
   new_content="${after_content%$'\n'}"
   after_hash="$(content_hash "$new_content")"
+  # metadata edited via frontmatter is not supported in editor flow; preserve current meta
   if [[ "$before" == "$after_hash" ]]; then
     echo "No changes."
     return 0
   fi
 
   # write local change (dirty until synced)
-  write_mirror_file "$RM_UID" "$RM_NAME" "${RM_VIS:-PRIVATE}" "$RM_CREATE" "${RM_UPDATE:-}" "${RM_STATE:-NORMAL}" "$new_content" false > /dev/null
+  write_mirror_file "$RM_UID" "$RM_NAME" "${RM_VIS:-PRIVATE}" "$RM_CREATE" "${RM_UPDATE:-}" "${RM_STATE:-NORMAL}" "$new_content" false "${RM_PINNED:-false}" "${RM_TAGS:-}"
 
   # remote update if this is a synced remote note
   if [[ "$RM_NAME" == memos/* && -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1; then
-    local resp m utime
-    if resp=$(api_update_memo "$RM_NAME" "$new_content" "${RM_VIS:-PRIVATE}" 2> /dev/null); then
+    local resp m utime vis rmstate rpinned rtags
+    if resp=$(api_update_memo "$RM_NAME" "$new_content" "${RM_VIS:-PRIVATE}" "${RM_STATE:-NORMAL}" "${RM_PINNED:-false}" 2> /dev/null); then
       m=$(printf '%s' "$resp" | normalize_memo_json)
       utime=$(printf '%s' "$m" | json_get '.updateTime')
+      vis=$(printf '%s' "$m" | json_get '.visibility')
+      rmstate=$(printf '%s' "$m" | json_get '.state')
+      rpinned=$(printf '%s' "$m" | json_get '.pinned')
+      rtags=$(printf '%s' "$m" | json_get '.tags')
       [[ -z "$utime" ]] && utime="$(now_iso)"
-      write_mirror_file "$RM_UID" "$RM_NAME" "${RM_VIS:-PRIVATE}" "$RM_CREATE" "$utime" "${RM_STATE:-NORMAL}" "$new_content" true > /dev/null
+      write_mirror_file "$RM_UID" "$RM_NAME" "${vis:-$RM_VIS}" "$RM_CREATE" "$utime" "${rmstate:-$RM_STATE}" "$new_content" true "${rpinned:-$RM_PINNED}" "${rtags:-$RM_TAGS}"
       notify "Updated & synced ($RM_UID)"
       echo "Updated $RM_UID"
       return 0
@@ -759,7 +843,7 @@ edit_note() {
 
   # queue update for later sync
   if [[ "$RM_NAME" == memos/* ]]; then
-    enqueue_op "update" "$(jq -n --arg name "$RM_NAME" --arg uid "$RM_UID" --arg content "$new_content" --arg visibility "${RM_VIS:-PRIVATE}" '{name:$name, uid:$uid, content:$content, visibility:$visibility}')" || true
+    enqueue_op "update" "$(jq -n --arg name "$RM_NAME" --arg uid "$RM_UID" --arg content "$new_content" --arg visibility "${RM_VIS:-PRIVATE}" --arg state "${RM_STATE:-NORMAL}" --arg pinned "${RM_PINNED:-false}" --arg tags "${RM_TAGS:-}" '{name:$name, uid:$uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" || true
     notify "Updated locally (queued for sync)"
     echo "Updated locally, queued ($RM_UID)"
   else
@@ -775,26 +859,31 @@ push_dirty_notes() {
   shopt -s nullglob
   for f in "$MIRROR_DIR"/*.md; do
     read_mirror_file "$f" || continue
-    local uid name vis cur_hash st_synced resp m utime
+    local uid name vis cur_ch st_ch cur_mh st_mh resp m utime rmstate rpinned rtags
     uid="$RM_UID"
     name="${RM_NAME:-memos/$uid}"
     vis="${RM_VIS:-PRIVATE}"
     [[ "$name" == memos/* ]] || continue
-    cur_hash="$(file_hash "$f")"
-    st_synced=$(jq -r --arg uid "$uid" '.notes[$uid].syncedHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
-    [[ "$cur_hash" == "$st_synced" ]] && continue
-    # dirty remote-backed note: try direct push, else queue
+    cur_ch="$(file_content_hash "$f")"
+    cur_mh="$(file_meta_hash "$f")"
+    st_ch=$(jq -r --arg uid "$uid" '(.notes[$uid].syncedContentHash // .notes[$uid].syncedHash // "")' "$STATE_FILE" 2> /dev/null || echo "")
+    st_mh=$(jq -r --arg uid "$uid" '.notes[$uid].syncedMetaHash // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    [[ "$cur_ch" == "$st_ch" && ("$cur_mh" == "$st_mh" || -z "$st_mh") ]] && continue
+    # dirty remote-backed note (content or metadata): try direct push, else queue
     if [[ -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1; then
-      if resp=$(api_update_memo "$name" "$RM_CONTENT" "$vis" 2> /dev/null); then
+      if resp=$(api_update_memo "$name" "$RM_CONTENT" "$vis" "${RM_STATE:-NORMAL}" "${RM_PINNED:-false}" 2> /dev/null); then
         m=$(printf '%s' "$resp" | normalize_memo_json)
         utime=$(printf '%s' "$m" | json_get '.updateTime')
+        rmstate=$(printf '%s' "$m" | json_get '.state')
+        rpinned=$(printf '%s' "$m" | json_get '.pinned')
+        rtags=$(printf '%s' "$m" | json_get '.tags')
         [[ -z "$utime" ]] && utime="$(now_iso)"
-        write_mirror_file "$uid" "$name" "$vis" "$RM_CREATE" "$utime" "${RM_STATE:-NORMAL}" "$RM_CONTENT" true > /dev/null
+        write_mirror_file "$uid" "$name" "${vis}" "$RM_CREATE" "$utime" "${rmstate:-$RM_STATE}" "$RM_CONTENT" true "${rpinned:-$RM_PINNED}" "${rtags:-$RM_TAGS}"
         pushed=$((pushed + 1))
         continue
       fi
     fi
-    enqueue_op "update" "$(jq -n --arg name "$name" --arg uid "$uid" --arg content "$RM_CONTENT" --arg visibility "$vis" '{name:$name, uid:$uid, content:$content, visibility:$visibility}')" || true
+    enqueue_op "update" "$(jq -n --arg name "$name" --arg uid "$uid" --arg content "$RM_CONTENT" --arg visibility "$vis" --arg state "${RM_STATE:-NORMAL}" --arg pinned "${RM_PINNED:-false}" --arg tags "${RM_TAGS:-}" '{name:$name, uid:$uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" || true
     queued=$((queued + 1))
   done
   shopt -u nullglob
@@ -817,7 +906,7 @@ flush_queue() {
     op=$(printf '%s' "$line" | jq -r '.op // "create"')
     case "$op" in
       create)
-        local content vis luid resp m uid name ctime utime mstate
+        local content vis luid resp m uid name ctime utime mstate rpinned rtags
         content=$(printf '%s' "$line" | jq -r '.payload.content // .content // empty')
         vis=$(printf '%s' "$line" | jq -r '.payload.visibility // .visibility // "PRIVATE"')
         luid=$(printf '%s' "$line" | jq -r '.payload.local_uid // empty')
@@ -828,13 +917,15 @@ flush_queue() {
           ctime=$(printf '%s' "$m" | json_get '.createTime')
           utime=$(printf '%s' "$m" | json_get '.updateTime')
           mstate=$(printf '%s' "$m" | json_get '.state')
+          rpinned=$(printf '%s' "$m" | json_get '.pinned')
+          rtags=$(printf '%s' "$m" | json_get '.tags')
           [[ -z "$name" && -n "$uid" ]] && name="memos/$uid"
           if [[ -n "$uid" ]]; then
             if [[ -n "$luid" && -f "$MIRROR_DIR/$(slug_uid "$luid").md" && "$luid" != "$uid" ]]; then
               rm -f "$MIRROR_DIR/$(slug_uid "$luid").md"
               state_remove_note "$luid"
             fi
-            write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$mstate" "$content" true > /dev/null
+            write_mirror_file "$uid" "$name" "${vis}" "$ctime" "$utime" "$mstate" "$content" true "$rpinned" "$rtags" > /dev/null
           fi
           ok=$((ok + 1))
         else
@@ -843,19 +934,26 @@ flush_queue() {
         fi
         ;;
       update)
-        local name content vis uid resp m utime
+        local name content vis uid resp m utime mstate pinned tags
         name=$(printf '%s' "$line" | jq -r '.payload.name // empty')
         content=$(printf '%s' "$line" | jq -r '.payload.content // empty')
         vis=$(printf '%s' "$line" | jq -r '.payload.visibility // "PRIVATE"')
+        mstate=$(printf '%s' "$line" | jq -r '.payload.state // "NORMAL"')
+        pinned=$(printf '%s' "$line" | jq -r '.payload.pinned // "false"')
+        tags=$(printf '%s' "$line" | jq -r '.payload.tags // ""')
         uid=$(printf '%s' "$line" | jq -r '.payload.uid // empty')
         [[ -z "$uid" && -n "$name" ]] && uid="$(memo_uid_from_name "$name")"
-        if [[ -n "$name" && "$name" == memos/* && -n "$content" ]] && resp=$(api_update_memo "$name" "$content" "$vis" 2> /dev/null); then
+        if [[ -n "$name" && "$name" == memos/* && -n "$content" ]] && resp=$(api_update_memo "$name" "$content" "$vis" "$mstate" "$pinned" 2> /dev/null); then
           m=$(printf '%s' "$resp" | normalize_memo_json)
           utime=$(printf '%s' "$m" | json_get '.updateTime')
+          vis=$(printf '%s' "$m" | json_get '.visibility')
+          mstate=$(printf '%s' "$m" | json_get '.state')
+          pinned=$(printf '%s' "$m" | json_get '.pinned')
+          tags=$(printf '%s' "$m" | json_get '.tags')
           [[ -z "$utime" ]] && utime="$(now_iso)"
           if [[ -n "$uid" && -f "$MIRROR_DIR/$(slug_uid "$uid").md" ]]; then
             read_mirror_file "$MIRROR_DIR/$(slug_uid "$uid").md" || true
-            write_mirror_file "$uid" "$name" "${RM_VIS:-$vis}" "$RM_CREATE" "$utime" "${RM_STATE:-NORMAL}" "$content" true > /dev/null
+            write_mirror_file "$uid" "$name" "${vis:-$RM_VIS}" "${RM_CREATE:-}" "$utime" "${mstate:-$RM_STATE}" "$content" true "${pinned:-$RM_PINNED}" "${tags:-$RM_TAGS}" > /dev/null
           fi
           ok=$((ok + 1))
         else
@@ -913,6 +1011,138 @@ cmd_sync() {
   return $rc
 }
 
+list_conflicts() {
+  ensure_dirs
+  need_tools
+  local found=0 uid file flag rdel st_name
+  echo "Conflicts (state):"
+  while IFS= read -r uid; do
+    [[ -z "$uid" ]] && continue
+    flag=$(jq -r --arg uid "$uid" '.notes[$uid].conflict // false' "$STATE_FILE" 2> /dev/null || echo false)
+    rdel=$(jq -r --arg uid "$uid" '.notes[$uid].remoteDeleted // false' "$STATE_FILE" 2> /dev/null || echo false)
+    st_name=$(jq -r --arg uid "$uid" '.notes[$uid].name // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    file=$(jq -r --arg uid "$uid" '.notes[$uid].file // ""' "$STATE_FILE" 2> /dev/null || echo "")
+    if [[ "$flag" == "true" || "$rdel" == "true" ]]; then
+      printf '  %s\tname=%s\tremoteDeleted=%s\tfile=%s\n' "$uid" "$st_name" "$rdel" "$file"
+      found=1
+    fi
+  done < <(jq -r '.notes | keys[]' "$STATE_FILE" 2> /dev/null)
+  [[ $found -eq 1 ]] || echo "  (none)"
+  echo "Conflict copies:"
+  shopt -s nullglob
+  local c foundc=0
+  for c in "$MIRROR_DIR"/*.remote-conflict-*.md; do
+    printf '  %s\n' "$(basename "$c")"
+    foundc=1
+  done
+  shopt -u nullglob
+  [[ $foundc -eq 1 ]] || echo "  (none)"
+}
+
+latest_conflict_file_for_uid() {
+  local uid="$1"
+  local f latest=""
+  shopt -s nullglob
+  for f in "$MIRROR_DIR/${uid}.remote-conflict-"*.md; do
+    if [[ -z "$latest" || "$f" -nt "$latest" ]]; then
+      latest="$f"
+    fi
+  done
+  shopt -u nullglob
+  printf '%s\n' "$latest"
+}
+
+resolve_note() {
+  local ref="${1:-}" mode="${2:-}"
+  [[ -n "$ref" && -n "$mode" ]] || die "Usage: memos resolve <ref> --keep-local|--keep-remote"
+  case "$mode" in
+    --keep-local | --keep-remote) ;;
+    *) die "Usage: memos resolve <ref> --keep-local|--keep-remote" ;;
+  esac
+  ensure_dirs
+  need_tools
+  local file uid name
+  file=$(resolve_ref_file "$ref") || die "Note not found in local mirror: $ref"
+  read_mirror_file "$file" || die "Failed to read mirror file: $file"
+  uid="$RM_UID"
+  name="${RM_NAME:-memos/$uid}"
+  local rdel
+  rdel=$(jq -r --arg uid "$uid" '.notes[$uid].remoteDeleted // false' "$STATE_FILE" 2> /dev/null || echo false)
+
+  if [[ "$mode" == "--keep-remote" ]]; then
+    if [[ "$rdel" == "true" ]]; then
+      rm -f "$file" "$MIRROR_DIR/${uid}.remote-conflict-"*.md 2> /dev/null || true
+      state_remove_note "$uid"
+      notify "Resolved ($uid): kept remote deletion"
+      echo "Resolved $uid: removed local copy (remote deleted)"
+      return 0
+    fi
+    local cf
+    cf="$(latest_conflict_file_for_uid "$uid")"
+    if [[ -z "$cf" || ! -f "$cf" ]]; then
+      echo "No remote conflict copy found for $uid; pulling..." >&2
+      pull_memos || true
+      cf="$(latest_conflict_file_for_uid "$uid")"
+    fi
+    [[ -f "$cf" ]] || die "Cannot resolve $uid: no remote conflict copy available"
+    read_mirror_file "$cf" || die "Failed to read conflict file: $cf"
+    # restore remote version as synced
+    write_mirror_file "$uid" "${RM_NAME:-$name}" "${RM_VIS:-PRIVATE}" "${RM_CREATE:-}" "${RM_UPDATE:-}" "${RM_STATE:-NORMAL}" "$RM_CONTENT" true "${RM_PINNED:-false}" "${RM_TAGS:-}" > /dev/null
+    rm -f "$MIRROR_DIR/${uid}.remote-conflict-"*.md 2> /dev/null || true
+    jq --arg uid "$uid" 'if .notes[$uid] then .notes[$uid].conflict=false | .notes[$uid].remoteDeleted=false else . end' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+    notify "Resolved ($uid): kept remote"
+    echo "Resolved $uid: kept remote version"
+    return 0
+  fi
+
+  # --keep-local
+  rm -f "$MIRROR_DIR/${uid}.remote-conflict-"*.md 2> /dev/null || true
+  jq --arg uid "$uid" 'if .notes[$uid] then .notes[$uid].conflict=false else . end' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+  if [[ "$rdel" == "true" ]]; then
+    # remote deleted: recreate as new remote note with same content
+    if [[ -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1; then
+      local created m new_uid new_name ctime utime vis mstate rpinned rtags
+      created=$(api_create_memo "$RM_CONTENT" "${RM_VIS:-PRIVATE}" 2> /dev/null || true)
+      if [[ -n "$created" ]]; then
+        m=$(printf '%s' "$created" | normalize_memo_json)
+        new_uid=$(printf '%s' "$m" | json_get '.uid')
+        new_name=$(printf '%s' "$m" | json_get '.name')
+        ctime=$(printf '%s' "$m" | json_get '.createTime')
+        utime=$(printf '%s' "$m" | json_get '.updateTime')
+        vis=$(printf '%s' "$m" | json_get '.visibility')
+        mstate=$(printf '%s' "$m" | json_get '.state')
+        rpinned=$(printf '%s' "$m" | json_get '.pinned')
+        rtags=$(printf '%s' "$m" | json_get '.tags')
+        [[ -z "$new_name" && -n "$new_uid" ]] && new_name="memos/$new_uid"
+        if [[ -n "$new_uid" ]]; then
+          rm -f "$file"
+          state_remove_note "$uid"
+          write_mirror_file "$new_uid" "$new_name" "$vis" "$ctime" "$utime" "$mstate" "$RM_CONTENT" true "$rpinned" "$rtags" > /dev/null
+          notify "Resolved ($uid): recreated remotely as $new_uid"
+          echo "Resolved $uid: recreated as $new_uid (remote was deleted)"
+          return 0
+        fi
+      fi
+    fi
+    # fallback: convert to local draft queued for create
+    local tmpid
+    tmpid="local-$(date +%s)-$RANDOM"
+    rm -f "$file"
+    state_remove_note "$uid"
+    write_mirror_file "$tmpid" "local/$tmpid" "${RM_VIS:-PRIVATE}" "$(now_iso)" "" "${RM_STATE:-NORMAL}" "$RM_CONTENT" false "${RM_PINNED:-false}" "${RM_TAGS:-}" > /dev/null
+    enqueue_op "create" "$(jq -n --arg local_uid "$tmpid" --arg content "$RM_CONTENT" --arg visibility "${RM_VIS:-PRIVATE}" --arg state "${RM_STATE:-NORMAL}" --arg pinned "${RM_PINNED:-false}" --arg tags "${RM_TAGS:-}" '{local_uid:$local_uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" || true
+    notify "Resolved ($uid): kept local (queued recreate)"
+    echo "Resolved $uid: kept local as $tmpid (queued recreate)"
+    return 0
+  fi
+
+  # normal conflict: keep local, mark dirty and try to push on next sync/push
+  jq --arg uid "$uid" '.notes[$uid].dirty = true' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+  notify "Resolved ($uid): kept local (will push on sync)"
+  echo "Resolved $uid: kept local version (run memos sync/push to send local)"
+  return 0
+}
+
 delete_note() {
   local ref="${1:-}"
   [[ -n "$ref" ]] || die "Usage: memos rm <ref>"
@@ -962,7 +1192,7 @@ print_completion() {
 _memos_completions() {
   local cur prev words cword
   _init_completion -s || return
-  local subcmds="new add quick sync flush list read edit rm delete pull push completion help"
+  local subcmds="new add quick sync flush list read edit rm delete conflicts resolve pull push completion help"
   if [[ $cword -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${subcmds} -h --help" -- "$cur") )
     return
@@ -999,6 +1229,8 @@ _memos() {
     'edit:Edit a note and push update'
     'rm:Delete a note'
     'delete:Delete a note (alias)'
+    'conflicts:List notes with sync conflicts'
+    'resolve:Resolve a conflict (--keep-local|--keep-remote)'
     'pull:Pull remote memos into local mirror'
     'push:Push local changes (dirty + queue)'
     'sync:Reconcile (push local + pull)'
@@ -1020,11 +1252,15 @@ _memos() {
       case $words[1] in
         completion) _values 'shell' bash zsh fish ;;
         list) _values 'opts' '--remote[List from API]' ;;
-        read|edit|rm|delete)
+        read|edit|rm|delete|resolve)
           local -a notes
           local ndir="${MEMOS_NOTES_DIR:-$HOME/notes/memos}/notes"
           [[ -d "$ndir" ]] && notes=(${ndir}/*.md(:t:r))
-          (( ${#notes} )) && _values 'note' $notes
+          if [[ $words[1] == resolve && ${#words[@]} -eq 3 ]]; then
+            _values 'mode' --keep-local --keep-remote
+          else
+            (( ${#notes} )) && _values 'note' $notes
+          fi
           ;;
         new|add|quick) _message 'note text (or stdin)' ;;
       esac
@@ -1046,6 +1282,8 @@ complete -c memos -n "__fish_use_subcommand" -a "read" -d "Read a note"
 complete -c memos -n "__fish_use_subcommand" -a "edit" -d "Edit a note and push update"
 complete -c memos -n "__fish_use_subcommand" -a "rm" -d "Delete a note"
 complete -c memos -n "__fish_use_subcommand" -a "delete" -d "Delete a note (alias)"
+complete -c memos -n "__fish_use_subcommand" -a "conflicts" -d "List notes with sync conflicts"
+complete -c memos -n "__fish_use_subcommand" -a "resolve" -d "Resolve a conflict"
 complete -c memos -n "__fish_use_subcommand" -a "pull" -d "Pull remote memos into local mirror"
 complete -c memos -n "__fish_use_subcommand" -a "push" -d "Push local changes (dirty + queue)"
 complete -c memos -n "__fish_use_subcommand" -a "sync" -d "Reconcile (push local + pull)"
@@ -1110,6 +1348,15 @@ main() {
     rm | delete)
       shift
       delete_note "${1:-}"
+      exit 0
+      ;;
+    conflicts)
+      list_conflicts
+      exit 0
+      ;;
+    resolve)
+      shift
+      resolve_note "${1:-}" "${2:-}"
       exit 0
       ;;
     completion)

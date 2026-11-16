@@ -45,6 +45,8 @@ memos list                 # list local mirror (or --remote)
 memos read <ref>           # show note (uid/name/prefix)
 memos edit <ref>           # edit in $EDITOR and push update
 memos rm <ref>             # delete note (alias: delete)
+memos conflicts            # list sync conflicts
+memos resolve <ref> --keep-local|--keep-remote  # resolve a conflict
 memos push                 # push local changes (dirty notes + queue), no pull
 memos sync                 # push local changes + pull
 memos flush                # flush outbound queue only
@@ -55,7 +57,7 @@ memos completion zsh       # source <(memos completion zsh)
 
 ## Storage model (mirror)
 
-- `~/notes/memos/notes/<uid>.md` — **one file per memo** with YAML frontmatter (`name`, `uid`, `visibility`, `createTime`, `updateTime`, `state`) and content body.
+- `~/notes/memos/notes/<uid>.md` — **one file per memo** with YAML frontmatter (`name`, `uid`, `visibility`, `state`, `pinned`, `tags`, `createTime`, `updateTime`) and content body.
 - `~/notes/memos/.sync/state.json` — sync state/id mapping.
 - `~/notes/memos/.queue.jsonl` — outbound operation queue (create/update/delete when offline or on failure).
 
@@ -65,5 +67,5 @@ memos completion zsh       # source <(memos completion zsh)
 
 - `memos push` = detect/push dirty mirror notes + flush queued ops (no pull). `memos flush` = flush queued ops only. `memos sync` = push local changes + pull (bidirectional foundation).
 - Delete propagation: `memos rm` deletes locally+remotely (or queues); `pull` removes locally if a previously-synced remote note is gone (keeps local and marks conflict if locally modified).
-- Conflict handling: concurrent edits may keep local and save remote as `*.remote-conflict-*` (no merge UI yet). Sync scope (tags/pin/attachments/visibility/state) and incremental reconciliation are still evolving (see PRD v0.2).
+- Conflict handling: concurrent edits keep local and save remote as `*.remote-conflict-*`. Use `memos conflicts` / `memos resolve <ref> --keep-local|--keep-remote` (basic flow, no merge UI). Metadata sync (`visibility`, `state`, `pinned`, mirrored `tags`) is best-effort; attachments and incremental reconciliation are still evolving (see PRD v0.2).
 - API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` and/or `MEMOS_DEBUG=1` if needed.

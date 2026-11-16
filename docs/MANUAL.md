@@ -66,6 +66,9 @@ memos list --remote        # list from API
 memos read <ref>           # show note (uid, name, filename, or prefix match)
 memos edit <ref>           # edit in $EDITOR and push update (or queue)
 memos rm <ref>             # delete note locally and remotely (alias: delete)
+memos conflicts            # list sync conflicts
+memos resolve <ref> --keep-local|--keep-remote
+                           # resolve a conflict
 
 memos push                 # push local changes (dirty notes + queue), no pull
 memos sync                 # reconcile: push local changes + pull
@@ -93,15 +96,18 @@ memos completion fish | source
   name: memos/<uid>
   uid: <uid>
   visibility: PRIVATE
+  state: NORMAL
+  pinned: false
+  tags: 
   createTime: 2026-...
   updateTime: 2026-...
-  state: NORMAL
   ---
 
   <content>
   ```
+  Frontmatter fields tracked/synced (best-effort): `visibility`, `state` (e.g. NORMAL/ARCHIVED), `pinned`. `tags` are mirrored for reference (typically derived from content by Memos). Editing content and/or these metadata fields in the mirror is detected and pushed on `push`/`sync` (subject to API support).
 - `~/notes/memos/.sync/state.json` — sync state / id mapping.
-- `~/notes/memos/.queue.jsonl` — outbound operation queue (`create`, `update`) for offline/failed pushes.
+- `~/notes/memos/.queue.jsonl` — outbound operation queue (`create`, `update`, `delete`) for offline/failed pushes.
 
 ### Behavior
 - **Create:** `memos new/add/"text"` tries to create via API and writes/updates the mirror file with returned ID/metadata; if offline/fails, creates a local `local-*` mirror entry and queues a `create` op.
@@ -109,15 +115,16 @@ memos completion fish | source
 - **List/Read:** `memos list` reads local mirror; `memos read <ref>` resolves by uid/name/filename/prefix from mirror.
 - **Edit:** `memos edit <ref>` opens content in `$EDITOR`; on change updates local mirror and attempts API update (`PATCH`), else queues `update` op.
 - **Delete:** `memos rm <ref>` (or `delete`) removes the note locally and attempts remote delete (`DELETE`), else queues a `delete` op. `memos pull` detects notes deleted remotely (that were previously synced): removes them locally if clean, but keeps local copy and marks conflict (`remoteDeleted`) if locally modified.
-- **Push/Flush/Sync:** `memos push` = detect/push dirty mirror notes + flush outbound queue (no pull). `memos flush` = flush outbound queue only. `memos sync` = push local changes (`push_dirty_notes` + queue) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
+- **Push/Flush/Sync:** `memos push` = detect/push dirty mirror notes (content/metadata) + flush outbound queue (no pull). `memos flush` = flush outbound queue only. `memos sync` = push local changes (`push_dirty_notes` + queue) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
+- **Conflicts:** `memos conflicts` lists conflicted notes and saved remote copies (`*.remote-conflict-*`). `memos resolve <ref> --keep-local` keeps local (queues/pushes on next sync; if remote was deleted, recreates/queues recreate) and clears conflict markers; `--keep-remote` restores the saved remote version (or removes local if remote deleted).
 
 ### Legacy daily logs
 Earlier create-only flow appended to `~/notes/memos/YYYY-MM-DD.md` (`## HH:MM` entries) without recording remote IDs. These **legacy logs are not auto-migrated/mapped** into the per-note mirror (to avoid duplicates/ambiguous matching). Recommended: run `memos pull` to build the canonical mirror from cloud; keep old daily files as archive/reference (move aside if desired) and use `notes/*.md` as the working mirror going forward.
 
 ### Limitations (current)
-- Conflict handling is basic: concurrent content edits may keep local and save remote as `notes/<uid>.remote-conflict-<ts>.md`; remote-deleted + locally-modified notes are kept locally and marked in state. There is no merge UI/automatic reconciliation flow yet.
-- Sync scope is incomplete: attachments, tags, pin/archive/visibility/state changes, and richer metadata are not fully synced.
-- Change detection/pull is not incremental (cursor-based); reconciliation of edge cases (rename/move, multi-device races) is evolving.
+- Conflict handling: concurrent edits keep local and save remote as `notes/<uid>.remote-conflict-<ts>.md`; remote-deleted + locally-modified notes are kept locally and marked. `memos conflicts`/`resolve` provide a basic keep-local/keep-remote flow, but there is no merge UI/automatic reconciliation.
+- Sync scope: content plus core metadata (`visibility`, `state`, `pinned`) are synced best-effort (subject to API/updateMask support). `tags` are mirrored (often derived from content by Memos) and not force-written. Attachments and richer metadata are not fully synced.
+- Change detection/pull is not incremental (cursor-based); reconciliation of edge cases (rename/move, multi-device races) and update deduplication are evolving.
 - API shapes vary by Memos version; auto-detection covers common `/api` vs `/api/v1` layouts but edge cases may require `MEMOS_API_PATH` or `MEMOS_DEBUG=1` diagnostics.
 
 ## 7. Makefile & Maintenance
