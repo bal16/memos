@@ -46,8 +46,4 @@ In Memos UI: **Settings > Storage**
 
 Create a **Personal Access Token** (admin) for `memo-quick` (Linux) and Moe Memos (Android).
 
-## Local / next steps
 
-- Validate Vercel Container availability & free-tier limits for this image (PRD Fase 0).
-- Confirm image tag (`neosmemo/memos:stable` vs `usememos/memos:stable`) and Memos API compatibility with Moe Memos.
-- Implement Linux gateway (`memo-quick`, `memo-nvim`, `systemd --user` sync timer) per PRD §10.2.
