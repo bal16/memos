@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically sync queued memos
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+Persistent=true
+Unit=memo-sync.service
+
+[Install]
+WantedBy=timers.target
