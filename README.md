@@ -1,6 +1,8 @@
 # Memos — Centralized Notes (Vercel + Neon)
 
-Stateless deployment of [`neosmemo/memos:stable`](https://github.com/usememos/memos) as a Vercel Container, with Neon as the only persistent storage. See [`docs/PRD.md`](docs/PRD.md) for the full product/architecture spec.
+Stateless deployment of Memos as a Vercel Container, with Neon as the only persistent storage. See [`docs/PRD.md`](docs/PRD.md) for the full product/architecture spec.
+
+**Upstream:** [usememos/memos](https://github.com/usememos/memos) ([usememos.com](https://www.usememos.com)) — open-source, self-hosted note-taking service.
 
 ## Architecture (reference: `project/satpol`)
 
