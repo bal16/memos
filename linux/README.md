@@ -4,10 +4,12 @@ Unified `memos` CLI with local per-note mirror (`notes/*.md` + frontmatter), out
 
 ## Requirements
 
-- `bash`, `curl`, `jq`
+- Linux with `bash` 4.0+ (script uses Bash features such as associative arrays), `curl`, `jq`
 - `libnotify` (`notify-send`) — optional
 - `neovim` (`nvim`) — for `new`/`edit`
 - `systemd --user` session
+
+`curl` requests use default timeouts (`--connect-timeout 10 --max-time 30`), overridable via `MEMOS_CURL_CONNECT_TIMEOUT` / `MEMOS_CURL_MAX_TIME`.
 
 ## Install / update
 

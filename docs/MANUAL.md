@@ -23,8 +23,9 @@ This manual covers the local Linux `memos` CLI: quick capture, per-note local mi
 - A running Memos instance (`MEMOS_URL`) with PostgreSQL + S3 storage configured and a user account.
 - A **Personal Access Token (PAT)** (`MEMOS_TOKEN`), e.g. from Memos UI (*Settings → Access Tokens*).
 - Linux with `systemd --user` session.
-- Tools: `bash`, `curl`, `jq` (required). Optional: `libnotify` (`notify-send`).
+- Tools: `bash` (4.0+, Linux target), `curl`, `jq` (required). Optional: `libnotify` (`notify-send`).
 - For editor flows: `neovim` (`nvim`, or `$EDITOR_NVIM`).
+- Network/API calls use `curl` with default timeouts (`--connect-timeout 10 --max-time 30`), overridable via `MEMOS_CURL_CONNECT_TIMEOUT` / `MEMOS_CURL_MAX_TIME`.
 
 ## 3. Installation
 

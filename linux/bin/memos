@@ -105,7 +105,9 @@ http_request() {
   local method="$1" path="$2" out="$3" data="${4:-}"
   local url
   url="$(base_url)$path"
-  local args=(-sS -o "$out" -w '%{http_code}' -X "$method" "$url" -H "Authorization: Bearer ${MEMOS_TOKEN}")
+  local connect_to="${MEMOS_CURL_CONNECT_TIMEOUT:-10}"
+  local max_to="${MEMOS_CURL_MAX_TIME:-30}"
+  local args=(-sS --connect-timeout "$connect_to" --max-time "$max_to" -o "$out" -w '%{http_code}' -X "$method" "$url" -H "Authorization: Bearer ${MEMOS_TOKEN}")
   if [[ -n "$data" ]]; then
     args+=(-H "Content-Type: application/json" -d "$data")
   fi
@@ -220,9 +222,35 @@ meta_hash() {
   meta_string "$1" "$2" "$3" "$4" | sha256sum | awk '{print $1}'
 }
 
+normalize_tags() {
+  # args: raw tags string (comma list, JSON array string, or bracketed list) -> canonical comma-separated
+  local raw="${1:-}"
+  raw="${raw%$'\r'}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  [[ -z "$raw" ]] && {
+    printf ''
+    return 0
+  }
+  # try JSON array
+  if printf '%s' "$raw" | jq -e 'type=="array"' > /dev/null 2>&1; then
+    printf '%s' "$raw" | jq -r 'map(tostring | gsub("^\\s+|\\s+$"; "")) | map(select(length>0)) | join(",")'
+    return 0
+  fi
+  # strip surrounding brackets if present: [a, b]
+  if [[ "$raw" == \[*\] ]]; then
+    raw="${raw#\[}"
+    raw="${raw%\]}"
+  fi
+  # normalize comma-separated values (trim spaces around items)
+  printf '%s' "$raw" | awk -F',' '{out=""; for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/, "", $i); if($i!=""){out = (out==""?$i:out "," $i)}} print out}'
+}
+
 tags_to_line() {
-  # stdin: json array or empty -> comma-separated
-  jq -r 'if type=="array" then map(tostring) | join(",") elif type=="string" then . else "" end' 2> /dev/null || echo ""
+  # stdin: json array or string -> canonical comma-separated
+  local raw
+  raw="$(cat)"
+  normalize_tags "$raw"
 }
 
 file_content_hash() {
@@ -258,6 +286,7 @@ file_meta_hash() {
 write_mirror_file() {
   # args: uid name visibility create update state content [mark_synced:true|false] [pinned] [tags]
   local uid="$1" name="$2" visibility="$3" create="$4" update="$5" mstate="$6" content="$7" mark_synced="${8:-true}" pinned="${9:-false}" tags="${10:-}"
+  tags="$(normalize_tags "$tags")"
   local file tmp
   file="$MIRROR_DIR/$(slug_uid "$uid").md"
   tmp="$(mktemp "$file.XXXXXX")"
@@ -330,7 +359,7 @@ read_mirror_file() {
         updateTime) RM_UPDATE="$val" ;;
         state) RM_STATE="$val" ;;
         pinned) RM_PINNED="$val" ;;
-        tags) RM_TAGS="$val" ;;
+        tags) RM_TAGS="$(normalize_tags "$val")" ;;
       esac
       continue
     fi
@@ -400,7 +429,7 @@ normalize_memo_json() {
     updateTime: (.updateTime // .update_time // .displayTime // .display_time // ""),
     state: (.state // "NORMAL"),
     pinned: (if (.pinned == true) then "true" else "false" end),
-    tags: (if (.tags | type) == "array" then (.tags | map(tostring) | join(",")) else (.tags // "" | tostring) end)
+    tags: (if (.tags | type) == "array" then (.tags | map(tostring | gsub("^\\s+|\\s+$"; "")) | map(select(length>0)) | join(",")) elif (.tags // "") == null then "" else ((.tags // "") | tostring | gsub("^\\s+|\\s+$"; "")) end)
   }'
 }
 
@@ -477,7 +506,7 @@ api_update_memo() {
 api_list_memos() {
   require_auth
   need_tools
-  local page_token="" out first=1
+  local page_token="" prev_page_token="" out first=1
   printf '['
   while :; do
     local q="/memos?pageSize=200"
@@ -509,11 +538,15 @@ api_list_memos() {
       i=$((i + 1))
     done
     [[ -z "$ntok" || "$ntok" == "null" ]] && break
+    if [[ -n "$prev_page_token" && "$ntok" == "$prev_page_token" ]]; then
+      debug "pagination token repeated, stopping to avoid loop"
+      break
+    fi
+    prev_page_token="$page_token"
     page_token="$ntok"
   done
   printf ']'
 }
-
 api_delete_memo() {
   local name="$1"
   local uid
