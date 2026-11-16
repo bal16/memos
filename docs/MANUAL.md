@@ -1,17 +1,20 @@
-# Usage Manual — Memos Quick-Capture (Linux)
+# Usage Manual — Memos CLI (Linux)
 
-This manual covers day-to-day usage of the local Linux quick-capture setup implemented in this repo (Phase 2), the scripts/units it provides, and maintenance (install/update/lint). For product scope and architecture, see [`PRD.md`](PRD.md). For deployment (Vercel + Neon), see [`../README.md`](../README.md).
+This manual covers day-to-day usage of the local Linux quick-capture setup implemented in this repo, the scripts/units it provides, and maintenance (install/update/lint). For product scope and architecture, see [`PRD.md`](PRD.md). For deployment (Vercel + Neon), see [`../README.md`](../README.md).
 
 ## 1. Overview
 
 **Goal:** capture notes instantly on Linux, keep a local Markdown archive, and sync to the self-hosted Memos instance (Vercel + Neon) in the background.
 
-**Flow:** input → `memo-quick` writes to local daily file → tries Memos API → on failure queues to `.queue.jsonl` → `memo-sync.timer` flushes periodically.
+**Current implementation (baseline):** local-first **create-only** capture with outbound queue and periodic flush. **Planned (PRD v0.2):** read/list/edit and bidirectional sync (see PRD §11).
+
+**Flow:** `memos`/input → write to local daily file → try Memos API (create) → on failure queue to `.queue.jsonl` → `memo-sync.timer` flushes periodically.
 
 | Component | Purpose |
 |---|---|
-| `memo-quick` | Single gateway CLI (FR-06): local-first write, API sync, offline queue/flush |
-| `memo-nvim` | Floating Neovim scratchpad wrapper that pipes saved content to `memo-quick` |
+| `memos` | Unified CLI/gateway (subcommand routing): new (editor), add/quick-create, sync/flush; future list/read/edit/pull/push |
+| `memo-quick` | Compatibility wrapper → `memos add` / `memos sync` |
+| `memo-nvim` | Compatibility wrapper → `memos new` (editor) |
 | `memo-sync.service` / `.timer` | `systemd --user` worker to flush the offline queue every 5 minutes |
 | `Makefile` / `scripts/install.sh` | Install, update, uninstall, and code-quality targets |
 
@@ -33,7 +36,7 @@ make install
 ```
 
 `make install` will:
-- Install `memo-quick` and `memo-nvim` to `~/.local/bin/`
+- Install `memos`, `memo-quick`, and `memo-nvim` to `~/.local/bin/`
 - Install systemd user units to `~/.config/systemd/user/memo-sync.{service,timer}`
 - Create `~/notes/memos/` (local archive + queue)
 - Create `~/.config/memo-quick/env` from `.env.example` if missing (mode 600) — **you must edit it**
@@ -70,23 +73,35 @@ MEMOS_VISIBILITY=PRIVATE   # PRIVATE | PROTECTED | PUBLIC (default: PRIVATE)
 
 Template variables are also documented in the repo’s [`.env.example`](../.env.example).
 
-## 5. Scripts & Behavior
+## 5. Commands & Behavior
 
-### 5.1 `memo-quick` (core CLI)
+### 5.1 `memos` (unified CLI, primary)
 
-**Location (installed):** `~/.local/bin/memo-quick` (source: `linux/bin/memo-quick`)
+**Location (installed):** `~/.local/bin/memos` (source: `linux/bin/memos`)
 
-**Usage:**
+**Subcommands / routing:**
+
 ```bash
-memo-quick "note content"          # from argument
-echo "note content" | memo-quick   # from stdin
-memo-quick --flush                 # drain offline queue
-memo-quick --sync                  # alias for --flush
-memo-quick --help
+memos                      # open Neovim scratchpad → create a new note
+memos new                  # new note (editor if interactive; stdin/args → quick-create)
+memos new "text"           # quick-create new note
+echo "text" | memos new    # quick-create from stdin
+
+memos add "text"           # quick-create new note
+memos quick "text"         # alias for quick-create
+memos "text"               # shorthand quick-create (unknown non-command arg)
+
+memos sync                 # flush offline queue (.queue.jsonl)
+memos flush                # alias for sync
+memos help                 # show help (-h/--help)
+
+# Planned (not yet implemented): list, read, edit, pull, push
 ```
 
-**Behavior (local-first, PRD FR-03/NFR-05):**
-1. Reads content from arguments or stdin (ignores empty/whitespace-only input).
+**Dispatch rules:** known subcommand → routed accordingly; `memos` with no args → editor (new); unknown first argument → treated as quick-create text (shorthand).
+
+**Behavior (local-first, create-only):**
+1. Reads content from arguments, stdin, or Neovim scratchpad (for `new`/default editor flow).
 2. **Always writes locally first** to `~/notes/memos/YYYY-MM-DD.md`, appending a timestamped entry:
    ```markdown
 
@@ -98,30 +113,24 @@ memo-quick --help
 4. On success: exits 0 (optional desktop notification “Saved & synced”).
 5. On failure (network error, cold start, non-2xx, missing config/tools): enqueues a JSON line in `~/notes/memos/.queue.jsonl` and exits 0 (notification “Saved locally (queued for sync)”). Local note is never lost due to sync failure.
 
-**Queue:** `.queue.jsonl` stores one JSON object per line (`content`, `visibility`, `created_at`). `--flush` retries each entry, removes successes, keeps failures, and reports `ok/failed`.
+**Queue:** `.queue.jsonl` stores one JSON object per line (`content`, `visibility`, `created_at`). `memos sync` retries each entry, removes successes, keeps failures, and reports `ok/failed`.
 
-**Dependencies:** `curl`, `jq` for API/queue; `notify-send` optional.
+**Editor flow (`memos` / `memos new` interactive):** opens a temp `.md` in Neovim (`$EDITOR_NVIM` or `nvim`) with `filetype=markdown` in Insert Mode; on exit, non-empty saved content is created as a note.
 
-### 5.2 `memo-nvim` (scratchpad)
+**Dependencies:** `curl`, `jq` for API/queue; `notify-send` optional; `nvim` for editor flow.
 
-**Location (installed):** `~/.local/bin/memo-nvim` (source: `linux/bin/memo-nvim`)
+### 5.2 Compatibility wrappers
 
-**Usage:**
-```bash
-memo-nvim
-```
+- **`memo-quick`** (`~/.local/bin/memo-quick`): `memo-quick "text"` / stdin → `memos add ...`; `memo-quick --flush|--sync` → `memos sync`; `--help` → `memos help`.
+- **`memo-nvim`** (`~/.local/bin/memo-nvim`): `memo-nvim` → `memos new` (editor).
 
-Opens a temporary `.md` file in Neovim, sets `filetype=markdown`, and enters Insert Mode. When you exit, any non-empty saved content is sent to `memo-quick`.
-
-- Uses `$EDITOR_NVIM` if set, otherwise `nvim`.
-- Resolves `memo-quick` next to itself, or from `PATH`, or via `$MEMO_QUICK_BIN`.
-- Typical flow: `Mod+N` → type → `:wq` → saved locally and synced/queued.
+Wrappers resolve `memos` next to themselves (or from `PATH`/`$MEMOS_BIN`), so installed and in-repo usage both work.
 
 ### 5.3 Background sync (`systemd --user`)
 
 **Units (installed):** `~/.config/systemd/user/memo-sync.service`, `~/.config/systemd/user/memo-sync.timer` (source: `linux/systemd/`)
 
-- **Service:** oneshot, runs `%h/.local/bin/memo-quick --flush` (waits for `network-online.target`).
+- **Service:** oneshot, runs `%h/.local/bin/memos sync` (waits for `network-online.target`).
 - **Timer:** starts 2 minutes after boot, then every 5 minutes (`OnUnitActiveSec=5m`), `Persistent=true`.
 
 **Manage manually:**
@@ -133,7 +142,7 @@ systemctl --user disable --now memo-sync.timer
 journalctl --user -u memo-sync.service -n 50 --no-pager
 ```
 
-> Note: triggering flush exactly on network-up is not wired by default; the periodic timer (and `Persistent=true`) covers reconnection. You can extend with network dispatcher hooks if desired.
+> Note: outbound queue flush only (create). Bidirectional pull/push sync is planned (PRD v0.2).
 
 ## 6. Makefile & Maintenance Scripts
 
@@ -141,7 +150,7 @@ Run from repo root:
 
 | Command | Description |
 |---|---|
-| `make install` / `./scripts/install.sh install` | Install binaries + units, create config/notes dirs, enable timer |
+| `make install` / `./scripts/install.sh install` | Install binaries (`memos`, wrappers) + units, create config/notes dirs, enable timer |
 | `make update` / `./scripts/install.sh update` | Update binaries + units, `daemon-reload`, restart timer |
 | `make uninstall` | Remove binaries + units (keeps `~/.config/memo-quick` and `~/notes/memos`) |
 | `make status` | Show installed files, config/notes paths, timer status |
@@ -161,30 +170,31 @@ PATH="$HOME/.local/share/nvim/mason/bin:$PATH" make check
 
 Not automated by `make install`; configure per environment:
 
-- **Niri / Hyprland:** bind `Mod+N` to launch `foot --app-id=quicknote memo-nvim` and add a floating window rule (e.g. 650x400, centered).
-- **Neovim (visual send):** map selection to pipe into `memo-quick`, e.g. `vnoremap <leader>mn :w !memo-quick<CR>` (adjust to your config).
-- **Shell widgets (DMS/Noctalia/GNOME):** execute `memo-quick` as a child process and stream text to stdin (no duplicated HTTP/token logic, FR-06).
+- **Niri / Hyprland:** bind `Mod+N` to launch `foot --app-id=quicknote memos` (or `memo-nvim`) and add a floating window rule (e.g. 650x400, centered).
+- **Neovim (visual send as new note):** map selection to pipe into quick-create, e.g. `vnoremap <leader>mn :w !memos add<CR>` (or keep `:w !memo-quick`).
+- **Shell widgets (DMS/Noctalia/GNOME):** execute `memos add` (or `memo-quick`) as a child process and stream text to stdin (no duplicated HTTP/token logic, FR-06).
 
 ## 8. Data & Paths
 
 | Path | Purpose |
 |---|---|
 | `~/.config/memo-quick/env` | Client config (`MEMOS_URL`, `MEMOS_TOKEN`, options), chmod 600 |
-| `~/notes/memos/YYYY-MM-DD.md` | Local daily Markdown archive (append-only, timestamped entries) |
-| `~/notes/memos/.queue.jsonl` | Offline sync queue (JSON Lines) |
-| `~/.local/bin/memo-quick`, `~/.local/bin/memo-nvim` | Installed CLIs |
+| `~/notes/memos/YYYY-MM-DD.md` | Local daily Markdown capture log (append-only, timestamped entries) |
+| `~/notes/memos/.queue.jsonl` | Offline outbound queue (JSON Lines) |
+| `~/.local/bin/memos`, `~/.local/bin/memo-quick`, `~/.local/bin/memo-nvim` | Installed CLI and compatibility wrappers |
 | `~/.config/systemd/user/memo-sync.{service,timer}` | Installed user units |
 
-Local `.md` files are the portable archive/backup (NFR-03); the cloud (Neon/Memos) remains the source of truth.
+**Important (current behavior):** local `.md` is an append-only capture log/archive — **not bidirectionally synced**. Each create produces a new local entry and a new cloud memo (no edit/update by ID, no cloud→local pull). Edits/deletes in Memos cloud do not reflect locally; editing local `.md` does not update cloud. Cloud (Memos/Neon) remains the canonical remote store (PRD v0.2). Read/edit and bidirectional sync are planned.
 
 ## 9. Troubleshooting
 
-- **“Saved locally (queued for sync)” / notes not appearing online:** check `MEMOS_URL`/`MEMOS_TOKEN` in `~/.config/memo-quick/env`, token validity/scopes, and that the instance is reachable. Try `memo-quick --flush` and inspect `/tmp/memo-quick-resp.*` behavior by running a manual `curl` if needed. Verify API path (`/api/memos` vs `/api/v1/memos`) matches your Memos version (`MEMOS_API_PATH`).
+- **“Saved locally (queued for sync)” / notes not appearing online:** check `MEMOS_URL`/`MEMOS_TOKEN` in `~/.config/memo-quick/env`, token validity/scopes, and that the instance is reachable. Try `memos sync` and inspect with a manual `curl` if needed. Verify API path (`/api/memos` vs `/api/v1/memos`) matches your Memos version (`MEMOS_API_PATH`).
 - **Timer not running:** ensure a `systemd --user` session is active (`systemctl --user status`), run `make enable-timer`, check `journalctl --user -u memo-sync.service`.
 - **`jq: command not found` / sync disabled:** install `jq` and `curl`.
 - **No notifications:** install `libnotify` (provides `notify-send`), or ignore — capture still works.
-- **Empty note:** `memo-quick` rejects whitespace-only input.
-- **PATH:** if `memo-quick`/`memo-nvim` not found, add `~/.local/bin` to `PATH`.
+- **Empty note:** rejected (whitespace-only input).
+- **PATH:** if `memos` not found, add `~/.local/bin` to `PATH`.
+- **Planned commands:** `memos list/read/edit/pull/push` currently exit with “not implemented yet”.
 
 ## 10. Security Notes
 

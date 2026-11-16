@@ -5,4 +5,4 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/memo-quick --flush
+ExecStart=%h/.local/bin/memos sync

@@ -10,7 +10,7 @@ NOTES_DIR    ?= $(HOME)/notes/memos
 
 BIN_SRC      := linux/bin
 UNIT_SRC     := linux/systemd
-SHELL_SRCS   := $(BIN_SRC)/memo-quick $(BIN_SRC)/memo-nvim scripts/install.sh
+SHELL_SRCS   := $(BIN_SRC)/memos $(BIN_SRC)/memo-quick $(BIN_SRC)/memo-nvim scripts/install.sh
 
 .PHONY: install update uninstall enable-timer disable-timer status help lint fmt fmt-check check quality
 
@@ -30,6 +30,7 @@ install: update enable-timer
 	@echo "Install complete."
 
 update:
+	@install -Dm755 "$(BIN_SRC)/memos" "$(BINDIR)/memos"
 	@install -Dm755 "$(BIN_SRC)/memo-quick" "$(BINDIR)/memo-quick"
 	@install -Dm755 "$(BIN_SRC)/memo-nvim" "$(BINDIR)/memo-nvim"
 	@install -Dm644 "$(UNIT_SRC)/memo-sync.service" "$(SYSTEMD_USER)/memo-sync.service"
@@ -47,13 +48,13 @@ disable-timer:
 	@systemctl --user disable --now memo-sync.timer 2>/dev/null || true
 
 uninstall: disable-timer
-	@rm -f "$(BINDIR)/memo-quick" "$(BINDIR)/memo-nvim"
+	@rm -f "$(BINDIR)/memos" "$(BINDIR)/memo-quick" "$(BINDIR)/memo-nvim"
 	@rm -f "$(SYSTEMD_USER)/memo-sync.service" "$(SYSTEMD_USER)/memo-sync.timer"
 	@systemctl --user daemon-reload 2>/dev/null || true
 	@echo "Removed binaries and units (kept $(MEMO_CONFIG) and $(NOTES_DIR))"
 
 status:
-	@echo "Binaries:"; ls -l "$(BINDIR)/memo-quick" "$(BINDIR)/memo-nvim" 2>/dev/null || true
+	@echo "Binaries:"; ls -l "$(BINDIR)/memos" "$(BINDIR)/memo-quick" "$(BINDIR)/memo-nvim" 2>/dev/null || true
 	@echo "Config: $(MEMO_CONFIG)/env"; echo "Notes:  $(NOTES_DIR)"
 	@systemctl --user status memo-sync.timer --no-pager 2>/dev/null || echo "timer: inactive/unavailable"
 
