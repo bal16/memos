@@ -4,9 +4,9 @@ Stateless deployment of Memos as a Vercel Container, with Neon as the only persi
 
 **Upstream:** [usememos/memos](https://github.com/usememos/memos) ([usememos.com](https://www.usememos.com)) — open-source, self-hosted note-taking service.
 
-## Architecture (reference: `project/satpol`)
+## Architecture
 
-Deployment follows the same Vercel Container pattern used in `/home/bal/workspace/project/satpol`:
+Deployment follows a Vercel Container pattern:
 
 | File | Role |
 |---|---|
