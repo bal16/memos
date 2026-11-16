@@ -48,6 +48,7 @@ MEMOS_TOKEN=<personal-access-token>
 MEMOS_VISIBILITY=PRIVATE   # PRIVATE | PROTECTED | PUBLIC (default: PRIVATE)
 # MEMOS_API_PATH=          # API root override (e.g. /api or /api/v1); auto-detected if unset
 # MEMOS_NOTES_DIR=$HOME/notes/memos
+# MEMOS_QUICK_MODE=local          # local (instant, default) | sync (wait for remote ID)
 ```
 
 - API routes are auto-detected by trying roots (newer `/api/...`, older `/api/v1/...`). Set `MEMOS_API_PATH` to force a root if needed.
@@ -56,9 +57,9 @@ MEMOS_VISIBILITY=PRIVATE   # PRIVATE | PROTECTED | PUBLIC (default: PRIVATE)
 
 ```bash
 memos                      # Neovim scratchpad → create a new note
-memos new [text...]        # new note (editor if interactive, else quick-create)
-memos add "text"           # quick-create new note (alias: quick)
-memos "text"               # shorthand quick-create
+memos new [--sync] [text...] # new note (editor if interactive, else quick-create)
+memos add [--sync] "text"  # quick-create (instant local-first by default)
+memos "text"               # shorthand quick-create (instant local-first)
 echo "text" | memos add
 
 memos pull                 # pull remote memos into local mirror
@@ -111,7 +112,7 @@ memos completion fish | source
 - `~/notes/memos/.queue.jsonl` — outbound operation queue (`create`, `update`, `delete`) for offline/failed pushes.
 
 ### Behavior
-- **Create:** `memos new/add/"text"` tries to create via API and writes/updates the mirror file with returned ID/metadata; if offline/fails, creates a local `local-*` mirror entry and queues a `create` op.
+- **Create (quick-capture):** by default `MEMOS_QUICK_MODE=local` for instant UX — `memos add/"text"` (and `memos new <text>`) saves to a local `local-*` mirror entry, queues a `create` op, returns immediately, and triggers a background flush (with `memo-sync.timer` as fallback). Use `--sync` (or `MEMOS_QUICK_MODE=sync`) to wait for remote creation and get a stable remote ID immediately. On flush/sync success the `local-*` entry is reconciled to the remote ID/metadata. Editor-only `memos`/`memos new` (no text) follows the same mode for saving after edit.
 - **Pull:** `memos pull` fetches memos from API and writes/updates mirror files + state (cloud treated as authoritative source for pulled records).
 - **List/Read:** `memos list` reads local mirror; `memos read <ref>` resolves by uid/name/filename/prefix from mirror.
 - **Edit:** `memos edit <ref>` opens content in `$EDITOR`; on change updates local mirror and attempts API update (`PATCH`), else queues `update` op.

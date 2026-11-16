@@ -32,14 +32,15 @@ MEMOS_TOKEN=<personal-access-token>
 # MEMOS_VISIBILITY=PRIVATE|PROTECTED|PUBLIC
 # MEMOS_API_PATH=                 # force API root (e.g. /api or /api/v1); auto-detected if unset
 # MEMOS_NOTES_DIR=$HOME/notes/memos
+# MEMOS_QUICK_MODE=local          # local (instant, default) | sync (wait for remote ID)
 ```
 
 ## Usage
 
 ```bash
 memos                      # Neovim scratchpad → create new note
-memos "hello world"        # quick-create (shorthand)
-memos add "hello world"    # quick-create
+memos "hello world"        # quick-create (shorthand, instant local-first)
+memos add [--sync] "hi"   # quick-create (--sync waits for remote ID)
 echo "note" | memos add
 
 memos pull                 # pull remote memos into local mirror
@@ -67,6 +68,7 @@ memos completion zsh       # source <(memos completion zsh)
 
 ## Notes
 
+- Quick-capture is local-first by default (`MEMOS_QUICK_MODE=local`): saves instantly, queues create, and triggers background flush (reconciled to remote ID on sync). Use `--sync` / `MEMOS_QUICK_MODE=sync` to wait for remote creation.
 - `memos push` = detect/push dirty mirror notes + flush queued ops (no pull). `memos flush` = flush queued ops only. `memos sync` = push local changes + pull (bidirectional foundation).
 - Delete propagation: `memos rm` deletes locally+remotely (or queues); `pull` removes locally if a previously-synced remote note is gone (keeps local and marks conflict if locally modified).
 - Conflict handling: concurrent edits keep local and save remote as `*.remote-conflict-*`. Use `memos conflicts` / `memos resolve <ref> --keep-local|--keep-remote` (basic flow, no merge UI). Metadata sync (`visibility`, `state`, `pinned`, mirrored `tags`) is best-effort; attachments and incremental reconciliation are still evolving (see PRD v0.2).

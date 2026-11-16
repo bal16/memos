@@ -14,6 +14,7 @@ MEMOS_TOKEN="${MEMOS_TOKEN:-}"
 MEMOS_VISIBILITY="${MEMOS_VISIBILITY:-PRIVATE}"
 MEMOS_API_PATH="${MEMOS_API_PATH:-}"
 MEMOS_DEBUG="${MEMOS_DEBUG:-0}"
+MEMOS_QUICK_MODE="${MEMOS_QUICK_MODE:-local}"
 NOTES_DIR="${MEMOS_NOTES_DIR:-$NOTES_DIR_DEFAULT}"
 MIRROR_DIR="$NOTES_DIR/notes"
 SYNC_DIR="$NOTES_DIR/.sync"
@@ -24,10 +25,10 @@ usage() {
   cat << 'EOF'
 Usage:
   memos                      Open Neovim scratchpad and create a new note
-  memos new [text...]        Create a new note (editor if no text/stdin, else quick)
-  memos add [text...]        Quick-create a new note from args or stdin
+  memos new [--sync] [text...]  Create a new note (editor if no text/stdin, else quick)
+  memos add [--sync] [text...]  Quick-create a new note from args or stdin (instant, local-first)
   memos quick [text...]      Alias for quick-create
-  memos "text"               Shorthand quick-create (unknown non-command arg)
+  memos "text"               Shorthand quick-create (instant, local-first)
   echo "text" | memos new    Create a new note from stdin
 
   memos list [--remote]      List notes (local mirror by default)
@@ -741,51 +742,88 @@ enqueue_op() {
   printf '%s\n' "$line" >> "$QUEUE_FILE"
 }
 
+trigger_background_flush() {
+  # best-effort background flush so queued ops sync without blocking the terminal
+  [[ -f "$QUEUE_FILE" ]] || return 0
+  [[ -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] || return 0
+  command -v curl > /dev/null 2>&1 || return 0
+  command -v jq > /dev/null 2>&1 || return 0
+  local self
+  self="$(command -v "$0" 2> /dev/null || printf '%s' "$0")"
+  nohup "$self" flush > /dev/null 2>&1 &
+  disown 2> /dev/null || true
+}
+
 save_new_note() {
-  local content="$1" visibility="${2:-$MEMOS_VISIBILITY}" mstate="${3:-NORMAL}" pinned="${4:-false}" tags="${5:-}"
+  local content="$1" visibility="${2:-$MEMOS_VISIBILITY}" mstate="${3:-NORMAL}" pinned="${4:-false}" tags="${5:-}" mode="${6:-${MEMOS_QUICK_MODE:-local}}"
   content="${content%$'\n'}"
   [[ -z "${content//[[:space:]]/}" ]] && die "Empty note, nothing to do."
   ensure_dirs
 
-  # try create remotely first to obtain stable ID
-  local created=""
-  if [[ -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+  # sync mode: try create remotely first to obtain stable ID immediately
+  if [[ "$mode" == "sync" && -n "$MEMOS_URL" && -n "$MEMOS_TOKEN" ]] && command -v curl > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+    local created=""
     created=$(api_create_memo "$content" "$visibility" 2> /dev/null || true)
+    if [[ -n "$created" ]]; then
+      local m uid name ctime utime vis rmstate rpinned rtags file
+      m=$(printf '%s' "$created" | normalize_memo_json)
+      uid=$(printf '%s' "$m" | json_get '.uid')
+      name=$(printf '%s' "$m" | json_get '.name')
+      ctime=$(printf '%s' "$m" | json_get '.createTime')
+      utime=$(printf '%s' "$m" | json_get '.updateTime')
+      vis=$(printf '%s' "$m" | json_get '.visibility')
+      rmstate=$(printf '%s' "$m" | json_get '.state')
+      rpinned=$(printf '%s' "$m" | json_get '.pinned')
+      rtags=$(printf '%s' "$m" | json_get '.tags')
+      [[ -n "$uid" ]] || uid="local-$(date +%s)-$RANDOM"
+      [[ -n "$name" ]] || name="memos/$uid"
+      file=$(write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$rmstate" "$content" true "$rpinned" "$rtags")
+      notify "Saved & synced ($uid)"
+      echo "$file"
+      return 0
+    fi
+    # fall through to local+queue on failure
   fi
 
-  if [[ -n "$created" ]]; then
-    local m uid name ctime utime vis rmstate rpinned rtags file
-    m=$(printf '%s' "$created" | normalize_memo_json)
-    uid=$(printf '%s' "$m" | json_get '.uid')
-    name=$(printf '%s' "$m" | json_get '.name')
-    ctime=$(printf '%s' "$m" | json_get '.createTime')
-    utime=$(printf '%s' "$m" | json_get '.updateTime')
-    vis=$(printf '%s' "$m" | json_get '.visibility')
-    rmstate=$(printf '%s' "$m" | json_get '.state')
-    rpinned=$(printf '%s' "$m" | json_get '.pinned')
-    rtags=$(printf '%s' "$m" | json_get '.tags')
-    [[ -n "$uid" ]] || uid="local-$(date +%s)-$RANDOM"
-    [[ -n "$name" ]] || name="memos/$uid"
-    file=$(write_mirror_file "$uid" "$name" "$vis" "$ctime" "$utime" "$rmstate" "$content" true "$rpinned" "$rtags")
-    notify "Saved & synced ($uid)"
-    echo "$file"
-    return 0
-  fi
-
-  # offline/failure: local draft in mirror + queue create op (dirty)
-  local tmpid file
+  # local-first (default): save instantly, queue create, sync in background
+  local tmpid file queued=0
   tmpid="local-$(date +%s)-$RANDOM"
   file=$(write_mirror_file "$tmpid" "local/$tmpid" "$visibility" "$(now_iso)" "" "$mstate" "$content" false "$pinned" "$tags")
   if command -v jq > /dev/null 2>&1; then
-    enqueue_op "create" "$(jq -n --arg local_uid "$tmpid" --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --arg pinned "$pinned" --arg tags "$tags" '{local_uid:$local_uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" || true
+    if enqueue_op "create" "$(jq -n --arg local_uid "$tmpid" --arg content "$content" --arg visibility "$visibility" --arg state "$mstate" --arg pinned "$pinned" --arg tags "$tags" '{local_uid:$local_uid, content:$content, visibility:$visibility, state:$state, pinned:$pinned, tags:$tags}')" 2> /dev/null; then
+      queued=1
+      trigger_background_flush
+    fi
   fi
-  notify "Saved locally (queued for sync)"
-  echo "$file"
+  if [[ $queued -eq 1 ]]; then
+    notify "Saved locally (syncing in background)"
+    echo "$file"
+  else
+    notify "Saved locally"
+    echo "$file"
+  fi
   return 0
 }
 
 quick_capture() {
-  local content
+  local mode="${MEMOS_QUICK_MODE:-local}" content
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sync | --wait)
+        mode="sync"
+        shift
+        ;;
+      --local)
+        mode="local"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *) break ;;
+    esac
+  done
   if [[ $# -gt 0 ]]; then
     content="$(printf '%s' "$*")"
   elif [[ ! -t 0 ]]; then
@@ -794,7 +832,7 @@ quick_capture() {
     echo "No input provided. Use: memos add \"text\" or pipe stdin." >&2
     exit 1
   fi
-  save_new_note "$content" "$MEMOS_VISIBILITY" > /dev/null
+  save_new_note "$content" "$MEMOS_VISIBILITY" "NORMAL" "false" "" "$mode" > /dev/null
 }
 
 new_via_editor() {
@@ -815,15 +853,19 @@ new_via_editor() {
     "$tmp"
 
   if [[ -s "$tmp" ]]; then
-    save_new_note "$(cat "$tmp")" "$MEMOS_VISIBILITY" > /dev/null
+    save_new_note "$(cat "$tmp")" "$MEMOS_VISIBILITY" "NORMAL" "false" "" "${MEMOS_QUICK_MODE:-local}" > /dev/null
   fi
 }
 
 cmd_new() {
-  if [[ $# -gt 0 ]]; then
+  local saw_mode=0 a
+  for a in "$@"; do
+    case "$a" in --sync | --wait | --local) saw_mode=1 ;; esac
+  done
+  if [[ $# -gt 0 && ($saw_mode -eq 1 || -n "${1:-}") ]]; then
     quick_capture "$@"
   elif [[ ! -t 0 ]]; then
-    quick_capture
+    quick_capture "$@"
   else
     new_via_editor
   fi
