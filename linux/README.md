@@ -1,24 +1,23 @@
-# Linux quick-capture (Phase 2+)
+# Linux quick-capture & sync (Phase 5/6 foundation)
 
-Unified `memos` CLI (local-first write + API sync + offline queue), Neovim scratchpad flow, and a `systemd --user` timer to flush the queue. Implements PRD §10.2 (baseline) and evolves toward the unified gateway in PRD v0.2.
+Unified `memos` CLI with local per-note mirror (`notes/*.md` + frontmatter), outbound queue, and Memos API sync (pull/list/read/create/edit). Implements PRD v0.2 foundation.
 
 ## Requirements
 
 - `bash`, `curl`, `jq`
-- `libnotify` (`notify-send`) — optional notifications
-- `neovim` (`nvim`) and `foot` (for scratchpad / compositor keybind)
+- `libnotify` (`notify-send`) — optional
+- `neovim` (`nvim`) — for `new`/`edit`
 - `systemd --user` session
 
-## Install / update (from this repo)
+## Install / update
 
 ```bash
 make install   # or: ./scripts/install.sh install
-make update    # or: ./scripts/install.sh update
+make update
 make status
-make uninstall
 ```
 
-Installs to `~/.local/bin/{memos,memo-quick,memo-nvim}` and `~/.config/systemd/user/memo-sync.{service,timer}`, creates `~/notes/memos` and `~/.config/memo-quick/env` (from `.env.example` if missing).
+Installs `~/.local/bin/{memos,memo-quick,memo-nvim}` and `~/.config/systemd/user/memo-sync.{service,timer}`.
 
 ## Configure
 
@@ -29,37 +28,38 @@ MEMOS_URL=https://your-memos.vercel.app
 MEMOS_TOKEN=<personal-access-token>
 # Optional:
 # MEMOS_VISIBILITY=PRIVATE|PROTECTED|PUBLIC
-# MEMOS_API_PATH=/api/memos        # or /api/v1/memos (auto-tries both if unset)
+# MEMOS_API_PATH=                 # force API root (e.g. /api or /api/v1); auto-detected if unset
 # MEMOS_NOTES_DIR=$HOME/notes/memos
 ```
 
 ## Usage
 
 ```bash
-memos                      # open Neovim scratchpad → :wq creates a new note
-memos new                  # same (editor if interactive, else stdin/args)
-memos "hello world"        # quick-create new note (shorthand)
-memos add "hello world"    # quick-create new note
-echo "note" | memos add    # quick-create from stdin
-memos sync                 # flush ~/notes/memos/.queue.jsonl (alias: flush)
-memos completion zsh       # print shell completions (bash|zsh|fish), e.g. source <(memos completion zsh)
+memos                      # Neovim scratchpad → create new note
+memos "hello world"        # quick-create (shorthand)
+memos add "hello world"    # quick-create
+echo "note" | memos add
 
-# Compatibility wrappers (still installed):
-memo-nvim                  # = memos new (editor)
-memo-quick "hello"         # = memos add "hello"
-memo-quick --flush         # = memos sync
+memos pull                 # pull remote memos into local mirror
+memos list                 # list local mirror (or --remote)
+memos read <ref>           # show note (uid/name/prefix)
+memos edit <ref>           # edit in $EDITOR and push update
+memos sync                 # flush outbound queue + pull
+memos flush                # flush/push outbound queue only
+memos completion zsh       # source <(memos completion zsh)
+
+# Compatibility wrappers: memo-nvim, memo-quick
 ```
 
-Behavior (PRD): appends a timestamped entry to `~/notes/memos/YYYY-MM-DD.md` first, then POSTs to Memos (`/api/memos`, fallback `/api/v1/memos`). On failure, queues JSON to `.queue.jsonl` and `memo-sync.timer` flushes every 5 minutes.
+## Storage model (mirror)
 
-> Planned (PRD v0.2, not yet implemented): `memos list/read/edit/pull/push` and bidirectional sync.
+- `~/notes/memos/notes/<uid>.md` — **one file per memo** with YAML frontmatter (`name`, `uid`, `visibility`, `createTime`, `updateTime`, `state`) and content body.
+- `~/notes/memos/.sync/state.json` — sync state/id mapping.
+- `~/notes/memos/.queue.jsonl` — outbound operation queue (create/update when offline or on failure).
 
-## Compositor / Neovim integration (Phase 3, manual)
-
-- **Niri/Hyprland:** bind `Mod+N` to `foot --app-id=quicknote memos` (or `memo-nvim`) with floating rule (650x400, centered).
-- **Neovim (visual):** `vnoremap <leader>mn :w !memos add<CR>` (or keep `:w !memo-quick`)
+**Recommendation/design (Phase 5/6):** per-note mirror files (stable ID mapping) are the canonical local representation for sync/edit. New captures create mirror files. Run `memos pull` to populate mirror from cloud (authoritative). Existing legacy daily logs `YYYY-MM-DD.md` (append-only, pre-mirror) are **not** auto-migrated/mapped to remote IDs (to avoid duplicates); keep them as archive/reference if present.
 
 ## Notes
 
-- Daily format: one file per day (`YYYY-MM-DD.md`) with `## HH:MM` entries (create-only append; edit/bidirectional sync is planned).
-- API path varies by Memos version; set `MEMOS_API_PATH` if auto-detection fails.
+- `memos sync` = push queued ops then pull (bidirectional foundation). Delete/conflict policy and richer reconciliation are evolving (see PRD v0.2).
+- API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` if needed.
