@@ -93,6 +93,7 @@ memos "text"               # shorthand quick-create (unknown non-command arg)
 
 memos sync                 # flush offline queue (.queue.jsonl)
 memos flush                # alias for sync
+memos completion <shell>   # print completion script (bash|zsh|fish)
 memos help                 # show help (-h/--help)
 
 # Planned (not yet implemented): list, read, edit, pull, push
@@ -118,6 +119,14 @@ memos help                 # show help (-h/--help)
 **Editor flow (`memos` / `memos new` interactive):** opens a temp `.md` in Neovim (`$EDITOR_NVIM` or `nvim`) with `filetype=markdown` in Insert Mode; on exit, non-empty saved content is created as a note.
 
 **Dependencies:** `curl`, `jq` for API/queue; `notify-send` optional; `nvim` for editor flow.
+
+**Shell completions:**
+```bash
+source <(memos completion zsh)   # zsh
+source <(memos completion bash)  # bash
+memos completion fish | source   # fish
+```
+(also completes `memo-quick` and `memo-nvim` wrappers)
 
 ### 5.2 Compatibility wrappers
 

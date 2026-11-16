@@ -42,6 +42,7 @@ memos "hello world"        # quick-create new note (shorthand)
 memos add "hello world"    # quick-create new note
 echo "note" | memos add    # quick-create from stdin
 memos sync                 # flush ~/notes/memos/.queue.jsonl (alias: flush)
+memos completion zsh       # print shell completions (bash|zsh|fish), e.g. source <(memos completion zsh)
 
 # Compatibility wrappers (still installed):
 memo-nvim                  # = memos new (editor)

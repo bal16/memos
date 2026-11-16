@@ -27,6 +27,7 @@ Usage:
   memos "text"               Shorthand quick-create (unknown non-command arg)
   echo "text" | memos new    Create a new note from stdin
   memos sync|flush           Flush offline queue (.queue.jsonl)
+  memos completion <shell>   Print shell completion script (bash|zsh|fish)
   memos help|-h|--help       Show this help
 
 Compatibility: memo-quick and memo-nvim are wrappers around this command.
@@ -37,6 +38,11 @@ Environment (from ~/.config/memo-quick/env by default):
   MEMOS_VISIBILITY PRIVATE|PROTECTED|PUBLIC (default: PRIVATE)
   MEMOS_API_PATH   Optional fixed path (e.g. /api/memos or /api/v1/memos)
   MEMOS_NOTES_DIR  Local archive dir (default: ~/notes/memos)
+
+Completions:
+  source <(memos completion zsh)
+  source <(memos completion bash)
+  memos completion fish | source
 EOF
 }
 
@@ -211,9 +217,113 @@ cmd_new() {
   fi
 }
 
+print_completion() {
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      cat << 'EOF'
+_memos_completions() {
+  local cur prev words cword
+  _init_completion -s || return
+  local subcmds="new add quick sync flush completion help list read edit pull push"
+  if [[ $cword -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "${subcmds} -h --help" -- "$cur") )
+    return
+  fi
+  prev="${words[1]}"
+  case "$prev" in
+    completion)
+      if [[ $cword -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+      fi
+      ;;
+  esac
+}
+complete -F _memos_completions memos memo-quick memo-nvim
+EOF
+      ;;
+    zsh)
+      cat << 'EOF'
+#compdef memos memo-quick memo-nvim
+
+_memos() {
+  local -a subcmds
+  subcmds=(
+    'new:Create a new note (editor or text/stdin)'
+    'add:Quick-create a new note from args or stdin'
+    'quick:Alias for quick-create'
+    'sync:Flush offline queue'
+    'flush:Alias for sync'
+    'completion:Print shell completion script'
+    'help:Show help'
+    'list:List notes (planned)'
+    'read:Read a note (planned)'
+    'edit:Edit a note (planned)'
+    'pull:Pull remote changes (planned)'
+    'push:Push local changes (planned)'
+  )
+
+  _arguments -C \
+    '1: :->cmd' \
+    '*::arg:->args' && return
+
+  case $state in
+    cmd)
+      _describe -t commands 'memos command' subcmds
+      _values 'options' '-h[Show help]' '--help[Show help]'
+      ;;
+    args)
+      case $words[1] in
+        completion)
+          _values 'shell' bash zsh fish
+          ;;
+        new|add|quick)
+          _message 'note text (or stdin)'
+          ;;
+        sync|flush|help|-h|--help)
+          ;;
+      esac
+      ;;
+  esac
+}
+
+compdef _memos memos memo-quick memo-nvim
+EOF
+      ;;
+    fish)
+      cat << 'EOF'
+complete -c memos -f
+complete -c memos -n "__fish_use_subcommand" -a "new" -d "Create a new note (editor or text/stdin)"
+complete -c memos -n "__fish_use_subcommand" -a "add" -d "Quick-create a new note"
+complete -c memos -n "__fish_use_subcommand" -a "quick" -d "Alias for quick-create"
+complete -c memos -n "__fish_use_subcommand" -a "sync" -d "Flush offline queue"
+complete -c memos -n "__fish_use_subcommand" -a "flush" -d "Alias for sync"
+complete -c memos -n "__fish_use_subcommand" -a "completion" -d "Print shell completion script"
+complete -c memos -n "__fish_use_subcommand" -a "help" -d "Show help"
+complete -c memos -n "__fish_use_subcommand" -a "list" -d "List notes (planned)"
+complete -c memos -n "__fish_use_subcommand" -a "read" -d "Read a note (planned)"
+complete -c memos -n "__fish_use_subcommand" -a "edit" -d "Edit a note (planned)"
+complete -c memos -n "__fish_use_subcommand" -a "pull" -d "Pull remote changes (planned)"
+complete -c memos -n "__fish_use_subcommand" -a "push" -d "Push local changes (planned)"
+complete -c memos -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
+complete -c memo-quick -w memos
+complete -c memo-nvim -w memos
+EOF
+      ;;
+    "")
+      echo "Usage: memos completion <bash|zsh|fish>" >&2
+      exit 1
+      ;;
+    *)
+      echo "Unsupported shell: $shell (supported: bash, zsh, fish)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 is_subcommand() {
   case "${1:-}" in
-    new | add | quick | sync | flush | help | -h | --help | list | read | edit | pull | push) return 0 ;;
+    new | add | quick | sync | flush | help | -h | --help | list | read | edit | pull | push | completion) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -229,6 +339,11 @@ main() {
     sync | flush)
       flush_queue
       exit $?
+      ;;
+    completion)
+      shift
+      print_completion "${1:-}"
+      exit 0
       ;;
     list | read | edit | pull | push)
       echo "Command '$cmd' is not implemented yet (planned for bidirectional sync/edit)." >&2
