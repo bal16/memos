@@ -58,4 +58,14 @@ In Memos UI: **Settings > Storage**
 
 Create a **Personal Access Token** (admin) for `memo-quick` (Linux) and Moe Memos (Android).
 
+## Linux CLI
+
+A local-first Linux CLI/gateway (`memos`) with per-note mirror and bidirectional sync is included under [`linux/`](linux/) (install via `make install`). See [Manual](docs/MANUAL.md) and [linux/README.md](linux/README.md) for usage.
+
+## Documentation
+
+- [PRD](docs/PRD.md) — product & architecture (milestones/status)
+- [Manual](docs/MANUAL.md) — CLI usage and operations
+- [Phase 0 validation](docs/research/phase-0-validation.md) — platform/API validation notes
+
 

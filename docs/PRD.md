@@ -1,6 +1,6 @@
 # PRD: Centralized Note Management & Cross-Platform Quick-Capture System
 
-Status: Draft v0.2 (bidirectional sync & editability scope added; core infra decisions retained, sync decisions evolving — see Sections 13 & 15) · Codename: `memos`
+Status: Draft v0.2 (bidirectional sync & editability scope added; core infra decisions retained, sync decisions evolving — see Sections 13 & 15) · Codename: `memos` · Updated: 2026-11-16 (milestones & implementation status refreshed)
 
 ## 1. Overview
 
@@ -8,7 +8,7 @@ A centralized note-taking system that eliminates note fragmentation across five 
 
 Core principle (revised): *local-first, cloud-persistent, bidirectionally synchronized*. Notes can be captured, **read, and edited** from Linux locally (Markdown) with low latency and offline resilience, while changes are synchronized in **both directions** with the Memos cloud so local and remote state converge.
 
-> **Implementation note (current state):** Phase 2 (as built) provides local-first **create-only** capture (`memo-quick`/`memo-nvim`) with an outbound queue and no cloud→local pull or edit/update flow. This PRD revision defines the target state (bidirectional sync + edit); see Section 11 milestones.
+> **Implementation note (current state):** The Linux CLI/gateway (`memos`, with `memo-quick`/`memo-nvim` wrappers) now implements the core of Phases 5–6: per-note Markdown mirror with ID mapping & sync state, bidirectional sync (push dirty + flush create/update/delete + pull), read/list/edit/delete, instant local-first quick-capture, basic conflict detection/resolution, and core metadata sync (best-effort `visibility/state/pinned`, mirrored `tags`). Desktop/client integrations (Phases 3–4) remain manual/pending and Phase 7 hardening is partial (see §11).
 
 ## 2. Problem
 
@@ -209,27 +209,31 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 
 **System dependencies:** `bash` (or a standalone compiled Go/Rust binary), `curl`, `jq`, `libnotify` (`notify-send`, optional), `systemd` (user session). Additional tooling may be required for robust sync/state (TBD).
 
-**Directory structure (target, subject to sync design):**
+**Directory structure (as implemented, evolving):**
 
 ```text
 ~/.local/bin/
-├── memo-quick          # Unified CLI/gateway (create/read/list/edit/sync entrypoints)
-└── memo-nvim           # Floating Neovim scratchpad wrapper (quick capture)
+├── memos               # Unified CLI/gateway (create/read/list/edit/delete/sync/push/pull/flush/conflicts/resolve)
+├── memo-quick          # Compatibility wrapper → memos add/sync
+└── memo-nvim           # Compatibility wrapper → memos new (editor)
 
 ~/.config/memo-quick/
 └── env                 # Stores MEMOS_URL and MEMOS_TOKEN (chmod 600)
 
 ~/notes/memos/
-├── YYYY-MM-DD.md       # (Current) daily Markdown capture log / OR per-note files (TBD by mapping design)
-├── .queue.jsonl        # Outbound/offline operation queue
-└── .sync/              # (Proposed) sync state: id map, remote cursors/timestamps, hashes, conflict artifacts (TBD)
+├── notes/<uid>.md      # Per-note Markdown mirror (frontmatter + content, stable ID mapping)
+├── .queue.jsonl        # Outbound/offline operation queue (create/update/delete)
+└── .sync/
+    └── state.json      # Sync state: id map, remote update times, content/meta hashes, conflict flags
 ```
 
-**Local format & mapping (to be finalized):** must allow stable association between a local Markdown note/file/section and a Memos note ID, preserve portability, and support detecting local vs remote edits. Options include per-note files with frontmatter/ID, or an indexed daily format — decision pending (see §13).
+Legacy append-only `YYYY-MM-DD.md` logs (pre-mirror) are not auto-migrated into the per-note mirror.
+
+**Local format & mapping (implemented foundation):** per-note files `notes/<uid>.md` with YAML frontmatter (`name`, `uid`, `visibility`, `state`, `pinned`, `tags`, `createTime`, `updateTime`) and content body, mapped to Memos note IDs; `.sync/state.json` tracks remote update time and content/metadata hashes for idempotent reconciliation and change/conflict detection. Legacy `YYYY-MM-DD.md` logs are retained as archive but not auto-mapped (see §13 migration).
 
 **Sync Worker (`systemd --user`):**
-- Periodic (and/or on-demand) reconciliation: flush outbound queue (push) and pull remote changes (list/get since cursor/update time) into the mirror.
-- Applies conflict policy deterministically; records conflicts for user review when needed.
+- Periodic (and/or on-demand) reconciliation (`memos sync`): push dirty local changes + flush outbound queue, then pull remote changes into the mirror. (Pull is currently list-based/full reconciliation, not cursor/incremental.)
+- Applies conflict policy deterministically (keep local, save remote conflict copy / mark `remoteDeleted` where applicable); records conflicts for user review via `memos conflicts` / `memos resolve`.
 
 ### 10.3 Client Interfaces per Environment
 
@@ -240,16 +244,16 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 
 ## 11. Implementation Milestones
 
-| Phase | Outcome | Status (as of v0.2 draft) |
+| Phase | Outcome | Status (updated 2026-11-16) |
 |---|---|---|
 | 0. Validation | Confirm Vercel Container & Neon free tier; test Memos API ↔ Moe Memos; confirm API version/routes | Done (validated in current deployment: CLI and Moe Memos functional; see `docs/research/phase-0-validation.md`) |
 | 1. Neon & Vercel Setup | PostgreSQL + Object Storage on Neon; deploy `neosmemo/memos:stable`; configure S3 in admin UI | Done (reported) |
 | 2. Core CLI & Systemd (create-only) | `memo-quick` (local-first create + outbound queue), `memo-nvim`, `systemd --user` flush timer, install scripts | Done (baseline) |
 | 3. Desktop & Compositor (capture) | Window rules + keybinds in Niri/Hyprland; Neovim send-selection mapping | Pending/manual |
 | 4. Client & Shell Extensions | Configure Moe Memos (Android), PWA (Windows 11), lightweight UI modules DMS/Noctalia/GNOME | Pending/manual |
-| 5. Read & Local Mirror Foundation | CLI read/list; define stable local format + ID mapping + sync state | Planned |
-| 6. Bidirectional Sync & Edit | Push updates/deletes, pull remote changes, edit workflow (CLI/Neovim), conflict policy, reconciliation worker | Planned |
-| 7. Hardening | Conflict UX, deletion/attachment handling, search, backups, observability | Planned |
+| 5. Read & Local Mirror Foundation | CLI read/list; define stable local format + ID mapping + sync state | **Done (foundation):** `list/read/pull`, per-note mirror `notes/<uid>.md` with frontmatter/ID mapping, `.sync/state.json`, `.queue.jsonl` |
+| 6. Bidirectional Sync & Edit | Push updates/deletes, pull remote changes, edit workflow (CLI/Neovim), conflict policy, reconciliation worker | **Largely done (evolving):** instant local-first capture, `edit`/push dirty, flush create/update/delete, pull/apply remote changes, delete propagation, conflict detection + `conflicts`/`resolve` (keep-local/keep-remote), `sync` reconciliation & timer; incremental sync & advanced conflict/race handling remain |
+| 7. Hardening | Conflict UX, deletion/attachment handling, search, backups, observability | **Partial:** basic conflict UX/resolve & delete handling, core metadata sync (`visibility/state/pinned`, mirrored `tags`), timeouts/pagination & parsing hardening, push/flush/sync semantics; attachments, search, backups, observability, merge UX & full scope still pending |
 
 ## 12. Risks & Mitigations
 
@@ -274,11 +278,11 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 - [x] Is Vercel Container (including free tier & duration/cold-start limits) available and sufficient for `neosmemo/memos:stable`? — **Resolved:** validated in current deployment (functional for personal use; continue monitoring quotas/cold starts).
 - [x] Which Memos API version/routes does the deployed instance expose, and which versions does Moe Memos support (PAT auth)? — **Resolved:** current deployed instance is compatible with Moe Memos and the Linux CLI (PAT auth working).
 - [x] Is `neosmemo/memos:stable` the correct image/tag, or pin a specific version for client compatibility? — **Resolved for now:** `neosmemo/memos:stable` in use and functional; consider pinning a specific resolved version for reproducibility/upgrade control.
-- [ ] **Local mirror format & mapping:** per-note `.md` files (e.g. with frontmatter/ID) vs daily file with addressable entries; how to map to Memos note IDs/names and support edits/deletes?
-- [ ] **Conflict-resolution policy:** last-write-wins (by `update_time`), keep-both/conflict copies, or manual merge — and how to surface conflicts?
-- [ ] **Sync scope:** include deletions, visibility, tags, pinned/archived state, and attachments in bidirectional sync?
-- [ ] **Change detection:** polling (interval/cursor) vs other mechanisms; acceptable sync latency (e.g. timer interval)?
-- [ ] **Migration:** how to backfill/map existing cloud notes and existing append-only local `YYYY-MM-DD.md` log into the new synced mirror without duplication?
+- [x] **Local mirror format & mapping:** per-note `.md` files `notes/<uid>.md` with frontmatter/ID mapping to Memos note IDs/names implemented (foundation); legacy daily logs not auto-mapped. Further refinements (e.g. richer addressing/migration tooling) may evolve.
+- [~] **Conflict-resolution policy:** deterministic baseline implemented (keep local, save remote as `*.remote-conflict-*`, mark `remoteDeleted` where applicable) with basic surfacing/flow via `memos conflicts` / `memos resolve --keep-local|--keep-remote`; no automatic merge/full LWW/keep-both UX yet.
+- [~] **Sync scope:** create/edit/delete propagated; core metadata (`visibility`, `state`, `pinned`) synced best-effort and `tags` mirrored (often derived). Attachments and richer metadata/state not yet fully synced bidirectionally.
+- [~] **Change detection:** polling/timer-based reconciliation via `memos sync` (`systemd` timer) and on-demand push/pull implemented (content+meta hash/updateTime comparison); cursor/incremental pull and finer latency tuning TBD.
+- [~] **Migration:** `memos pull` backfills/populates mirror from cloud (authoritative). Existing append-only local `YYYY-MM-DD.md` logs are **not** auto-migrated/mapped to avoid duplication/ambiguity (kept as archive). Dedicated migration tooling TBD.
 - [ ] Write authority: single user only, or multi-user support later?
 
 ## 14. Success Metrics
@@ -303,8 +307,8 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 | Local gateway | Single unified gateway (`memo-quick`, extensible) (FR-06) | Locked |
 | Sync direction | **Bidirectional** (push local changes, pull remote changes) with conflict policy | **New (v0.2)** |
 | Editability | **Create, read, and edit/update** supported (subject to sync design/mapping) | **New (v0.2)** |
-| Local format & ID mapping | `~/notes/memos` Markdown mirror with stable mapping/state (exact structure TBD) | **Evolving** (replaces fixed "append-only daily log only") |
-| Offline queue | Outbound queue (e.g. `.queue.jsonl`) retained/extended for offline operations | Evolving |
+| Local format & ID mapping | Per-note `~/notes/memos/notes/<uid>.md` mirror with frontmatter + `.sync/state.json` mapping/hashes (legacy daily log retained, not auto-mapped) | **Implemented (foundation, evolving)** |
+| Offline queue | Outbound queue `.queue.jsonl` for offline create/update/delete with background/periodic flush & reconciliation | Implemented (foundation) |
 | Clients | Moe Memos (Android), Memos PWA (Windows) | Locked |
 | Cost | $0 (free tiers, no home server) | Locked |
 

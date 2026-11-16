@@ -6,16 +6,16 @@ This manual covers the local Linux `memos` CLI: quick capture, per-note local mi
 
 **Goal:** capture notes instantly on Linux, maintain a local Markdown mirror, and sync with a self-hosted Memos instance (Vercel + Neon).
 
-**Current implementation:** unified CLI with **per-note mirror** (one `.md` file per memo), **list/read/pull/create/edit**, **delete propagation**, and outbound queue + reconciliation foundation (PRD v0.2 Phase 5/6). Conflict resolution/reconciliation and sync scope (tags/pin/attachments/visibility-full) are still evolving.
+**Current implementation:** unified CLI with **per-note mirror** (one `.md` file per memo), **instant local-first quick-capture**, **list/read/pull/create/edit/delete**, **bidirectional sync** (push dirty + flush create/update/delete + pull), **basic conflict detection & resolution**, and **core metadata sync** (best-effort `visibility/state/pinned`, mirrored `tags`). This covers the core of PRD v0.2 Phases 5–6; Phase 7 hardening is partial (attachments, search, backups, observability, merge UX/incremental sync remain evolving).
 
-**Flow:** create/edit locally in mirror → push to Memos API (or queue if offline) → `memos sync`/timer flushes queue and pulls remote changes into mirror.
+**Flow:** create/edit locally in mirror (queued if offline / synced in background for quick-capture) → `memos sync`/`push`/timer flushes & pushes changes → pulls remote changes and reconciles.
 
 | Component | Purpose |
 |---|---|
-| `memos` | Unified CLI/gateway: new/add, list/read/edit, pull/push/sync/flush, completion |
+| `memos` | Unified CLI/gateway: new/add, list/read/edit/rm, conflicts/resolve, pull/push/sync/flush, completion |
 | `memo-quick` | Compatibility wrapper → `memos add` / `memos sync` |
 | `memo-nvim` | Compatibility wrapper → `memos new` (editor) |
-| `memo-sync.service` / `.timer` | `systemd --user` worker: periodic `memos sync` (flush + pull) |
+| `memo-sync.service` / `.timer` | `systemd --user` worker: periodic `memos sync` (push local + pull) |
 | `Makefile` / `scripts/install.sh` | Install, update, uninstall, and code-quality targets |
 
 ## 2. Prerequisites
@@ -80,7 +80,7 @@ memos completion <shell>   # bash|zsh|fish
 memos help
 ```
 
-**Dispatch:** known subcommand routes; no args → editor new; unknown first arg → quick-create text. `list/read/edit/pull/push` operate on the mirror/API (see below).
+**Dispatch:** known subcommand routes; no args → editor new; unknown first arg → quick-create text (local-first by default). `list/read/edit/rm/conflicts/resolve/pull/push/sync/flush` operate on the mirror/API (see below). Quick-capture accepts `--sync`/`--wait` (or `--local`) and honors `MEMOS_QUICK_MODE=local|sync`.
 
 **Shell completions:**
 ```bash
@@ -118,7 +118,7 @@ memos completion fish | source
 - **Edit:** `memos edit <ref>` opens content in `$EDITOR`; on change updates local mirror and attempts API update (`PATCH`), else queues `update` op.
 - **Delete:** `memos rm <ref>` (or `delete`) removes the note locally and attempts remote delete (`DELETE`), else queues a `delete` op. `memos pull` detects notes deleted remotely (that were previously synced): removes them locally if clean, but keeps local copy and marks conflict (`remoteDeleted`) if locally modified.
 - **Push/Flush/Sync:** `memos push` = detect/push dirty mirror notes (content/metadata) + flush outbound queue (no pull). `memos flush` = flush outbound queue only. `memos sync` = push local changes (`push_dirty_notes` + queue) + `pull`. `memo-sync.timer` runs `memos sync` periodically.
-- **Conflicts:** `memos conflicts` lists conflicted notes and saved remote copies (`*.remote-conflict-*`). `memos resolve <ref> --keep-local` keeps local (queues/pushes on next sync; if remote was deleted, recreates/queues recreate) and clears conflict markers; `--keep-remote` restores the saved remote version (or removes local if remote deleted).
+- **Conflicts:** `memos conflicts` lists conflicted notes and saved remote copies (`*.remote-conflict-*`). `memos resolve <ref> --keep-local` keeps local (queues/pushes on next sync; if remote was deleted, recreates/queues recreate as a new remote note/ID) and clears conflict markers; `--keep-remote` restores the saved remote version (or removes local if remote deleted). Basic flow, no automatic merge UI.
 
 ### Legacy daily logs
 Earlier create-only flow appended to `~/notes/memos/YYYY-MM-DD.md` (`## HH:MM` entries) without recording remote IDs. These **legacy logs are not auto-migrated/mapped** into the per-note mirror (to avoid duplicates/ambiguous matching). Recommended: run `memos pull` to build the canonical mirror from cloud; keep old daily files as archive/reference (move aside if desired) and use `notes/*.md` as the working mirror going forward.
@@ -127,7 +127,8 @@ Earlier create-only flow appended to `~/notes/memos/YYYY-MM-DD.md` (`## HH:MM` e
 - Conflict handling: concurrent edits keep local and save remote as `notes/<uid>.remote-conflict-<ts>.md`; remote-deleted + locally-modified notes are kept locally and marked. `memos conflicts`/`resolve` provide a basic keep-local/keep-remote flow, but there is no merge UI/automatic reconciliation.
 - Sync scope: content plus core metadata (`visibility`, `state`, `pinned`) are synced best-effort (subject to API/updateMask support). `tags` are mirrored (often derived from content by Memos) and not force-written. Attachments and richer metadata are not fully synced.
 - Change detection/pull is not incremental (cursor-based); reconciliation of edge cases (rename/move, multi-device races) and update deduplication are evolving.
-- API shapes vary by Memos version; auto-detection covers common `/api` vs `/api/v1` layouts but edge cases may require `MEMOS_API_PATH` or `MEMOS_DEBUG=1` diagnostics.
+- Legacy append-only `YYYY-MM-DD.md` logs are not auto-migrated into the per-note mirror.
+- API shapes vary by Memos version; auto-detection covers common `/api` vs `/api/v1` layouts but edge cases may require `MEMOS_API_PATH` or `MEMOS_DEBUG=1` diagnostics. Desktop compositor keybinds and mobile/desktop client integrations are manual (PRD Phases 3–4).
 
 ## 7. Makefile & Maintenance
 

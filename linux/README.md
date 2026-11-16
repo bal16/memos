@@ -1,6 +1,6 @@
-# Linux quick-capture & sync (Phase 5/6 foundation)
+# Linux quick-capture & sync (Phases 5–6, hardening partial)
 
-Unified `memos` CLI with local per-note mirror (`notes/*.md` + frontmatter), outbound queue, and Memos API sync (pull/list/read/create/edit/delete). Implements PRD v0.2 foundation (hardening in progress).
+Unified `memos` CLI with local-first instant quick-capture, per-note mirror (`notes/*.md` + frontmatter/state), and bidirectional Memos API sync (create/read/list/edit/delete, conflicts/resolve, core metadata). Implements the core of PRD v0.2 Phases 5–6; Phase 7 hardening is in progress.
 
 ## Requirements
 
@@ -71,5 +71,5 @@ memos completion zsh       # source <(memos completion zsh)
 - Quick-capture is local-first by default (`MEMOS_QUICK_MODE=local`): saves instantly, queues create, and triggers background flush (reconciled to remote ID on sync). Use `--sync` / `MEMOS_QUICK_MODE=sync` to wait for remote creation.
 - `memos push` = detect/push dirty mirror notes + flush queued ops (no pull). `memos flush` = flush queued ops only. `memos sync` = push local changes + pull (bidirectional foundation).
 - Delete propagation: `memos rm` deletes locally+remotely (or queues); `pull` removes locally if a previously-synced remote note is gone (keeps local and marks conflict if locally modified).
-- Conflict handling: concurrent edits keep local and save remote as `*.remote-conflict-*`. Use `memos conflicts` / `memos resolve <ref> --keep-local|--keep-remote` (basic flow, no merge UI). Metadata sync (`visibility`, `state`, `pinned`, mirrored `tags`) is best-effort; attachments and incremental reconciliation are still evolving (see PRD v0.2).
+- Conflict handling: concurrent edits keep local and save remote as `*.remote-conflict-*`. Use `memos conflicts` / `memos resolve <ref> --keep-local|--keep-remote` (basic flow, no merge UI). Metadata sync (`visibility`, `state`, `pinned`, mirrored `tags`) is best-effort; attachments and incremental/cursor pull are still evolving (see PRD v0.2). Desktop/client integrations (Phases 3–4) are manual.
 - API routes auto-detected (`/api` + `/memos` vs `/api/v1`); set `MEMOS_API_PATH` and/or `MEMOS_DEBUG=1` if needed.
