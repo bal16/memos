@@ -4,6 +4,18 @@ Stateless deployment of Memos as a Vercel Container, with Neon as the only persi
 
 **Upstream:** [usememos/memos](https://github.com/usememos/memos) ([usememos.com](https://www.usememos.com)) — open-source, self-hosted note-taking service.
 
+## Known clients
+
+Any client compatible with the Memos API can be used against your self-hosted instance. Official access is the web UI (installable as a PWA on desktop/mobile). Some known third-party options:
+
+| Client | Platform | Notes |
+|---|---|---|
+| [Memos Web / PWA](https://www.usememos.com/docs/getting-started) | Windows, macOS, Linux, mobile (browser) | Official web UI; installable as a PWA for app-like access |
+| [Moe Memos](https://memos.moe/) ([iOS](https://apps.apple.com/app/moe-memos/id1636903953), [Android](https://play.google.com/store/apps/details?id=me.mudkip.moememos)) | iOS, iPadOS, Android | Native mobile client |
+| [Memento](https://github.com/tlwhittaker/memento) | Terminal (TUI) | Community TUI client |
+
+Native third-party mobile apps exist (e.g. Moe Memos); for Windows/macOS/Linux, most people use the official web UI/PWA rather than a dedicated native desktop binary. More community clients and integrations are listed in the [Memos docs](https://www.usememos.com/docs).
+
 ## Architecture
 
 Deployment follows a Vercel Container pattern:

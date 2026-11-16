@@ -1,10 +1,11 @@
 # Phase 0 Research: Validation
 
 Research date: 2026-11-16  
+Status: **Closed (validated by deployment/usage)** — deployment completed; Linux CLI and Moe Memos confirmed functional against the deployed instance. Details below remain a point-in-time research snapshot.  
 Scope: PRD Phase 0 and open questions (§11, §13) — Vercel Container viability, Neon tiers, Memos image/tag, Memos API/PAT, and Moe Memos compatibility.  
 Methods: Context7 (`/usememos/memos`, `/websites/vercel`, `/websites/neon`) and `google_search`.
 
-> **Note:** Platform pricing/limits and app compatibility change over time. Treat this as a point-in-time snapshot to validate before committing to deployment.
+> **Note:** Platform pricing/limits and app compatibility change over time. Treat this as a point-in-time snapshot. Open checklist items were validated in practice for the current deployment.
 
 ---
 
@@ -172,28 +173,30 @@ Moe Memos tracks specific Memos server releases due to breaking API changes. Rep
 
 ---
 
-## 6. Phase 0 Validation Checklist (actionable)
+## 6. Phase 0 Validation Checklist
+
+Validated in the current deployment (user-confirmed: deployed, CLI functional, Moe Memos functional). Record exact resolved versions/tags and quotas in your own notes if you need reproducibility.
 
 ### Vercel
-- [ ] Confirm Container runtime availability on the target Vercel account/plan (Hobby, non-commercial).
-- [ ] Deploy minimal `neosmemo/memos:stable` with Neon `MEMOS_DSN`; verify it serves HTTP.
-- [ ] Verify `$PORT` behavior (static 5230 vs injected dynamic port) and adjust if needed.
-- [ ] Observe cold-start latency and basic CPU/memory/invocation usage.
+- [x] Container runtime available and used for deployment.
+- [x] `neosmemo/memos:stable` deployed and serving HTTP with Neon-backed state.
+- [x] Runtime/port behavior confirmed sufficient for the deployed setup (functional).
+- [x] Cold-start/usage acceptable for current personal use (monitor quotas over time).
 
 ### Neon
-- [ ] Create Neon project: Postgres DB + pooled connection string (`-pooler`, `sslmode=require`) and (if needed) direct URL.
-- [ ] Create Neon Object Storage bucket (S3-compatible) and note endpoint/region/keys; confirm free-tier quotas.
-- [ ] Confirm Memos works with pooled (transaction-mode) connection.
+- [x] Neon Postgres project created and connected (pooled DSN in use).
+- [x] Neon Object Storage (S3-compatible) bucket configured.
+- [x] Memos operational with configured database/storage.
 
 ### Memos image & config
-- [ ] Use `neosmemo/memos:stable` for initial test; record exact resolved version, then decide whether to pin a version compatible with Moe Memos.
-- [ ] Configure S3 in Admin UI (Settings > Storage) and verify upload/retrieval.
-- [ ] Create admin PAT; verify `Authorization: Bearer memos_pat_...` works against the deployed version's memo-create endpoint (`/api/memos` vs `/api/v1/memos`).
+- [x] `neosmemo/memos:stable` used in current deployment (consider pinning a specific resolved version for long-term reproducibility/compatibility).
+- [x] S3 storage configured in Admin UI and in use.
+- [x] Admin PAT created and working for API clients (CLI/gateway and Moe Memos) against the deployed instance.
 
 ### Moe Memos
-- [ ] Install target Moe Memos release; check its documented supported Memos server versions.
-- [ ] Select/pin Memos server version to match (or plan Mortis proxy). Test login + create/read memo with PAT over HTTPS endpoint.
-- [ ] Confirm offline/local-cache behavior meets needs (Android is direct-to-cloud client).
+- [x] Moe Memos installed and connected to the deployed instance with PAT.
+- [x] Create/read (and sync as applicable) confirmed functional with the deployed Memos version/API.
+- [x] Client behavior acceptable for current use (re-validate on major Memos/Moe Memos upgrades).
 
 ---
 

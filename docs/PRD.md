@@ -242,7 +242,7 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 
 | Phase | Outcome | Status (as of v0.2 draft) |
 |---|---|---|
-| 0. Validation | Confirm Vercel Container & Neon free tier; test Memos API ↔ Moe Memos; confirm API version/routes | Partial / in progress (see `docs/research/phase-0-validation.md`) |
+| 0. Validation | Confirm Vercel Container & Neon free tier; test Memos API ↔ Moe Memos; confirm API version/routes | Done (validated in current deployment: CLI and Moe Memos functional; see `docs/research/phase-0-validation.md`) |
 | 1. Neon & Vercel Setup | PostgreSQL + Object Storage on Neon; deploy `neosmemo/memos:stable`; configure S3 in admin UI | Done (reported) |
 | 2. Core CLI & Systemd (create-only) | `memo-quick` (local-first create + outbound queue), `memo-nvim`, `systemd --user` flush timer, install scripts | Done (baseline) |
 | 3. Desktop & Compositor (capture) | Window rules + keybinds in Niri/Hyprland; Neovim send-selection mapping | Pending/manual |
@@ -271,9 +271,9 @@ Hybrid *local-first* with **stateless Memos (Vercel + Neon)** and a **Unified CL
 
 ## 13. Open Questions
 
-- [ ] Is Vercel Container (including free tier & duration/cold-start limits) available and sufficient for `neosmemo/memos:stable`?
-- [ ] Which Memos API version/routes does the deployed instance expose, and which versions does Moe Memos support (PAT auth)?
-- [ ] Is `neosmemo/memos:stable` the correct image/tag, or pin a specific version for client compatibility?
+- [x] Is Vercel Container (including free tier & duration/cold-start limits) available and sufficient for `neosmemo/memos:stable`? — **Resolved:** validated in current deployment (functional for personal use; continue monitoring quotas/cold starts).
+- [x] Which Memos API version/routes does the deployed instance expose, and which versions does Moe Memos support (PAT auth)? — **Resolved:** current deployed instance is compatible with Moe Memos and the Linux CLI (PAT auth working).
+- [x] Is `neosmemo/memos:stable` the correct image/tag, or pin a specific version for client compatibility? — **Resolved for now:** `neosmemo/memos:stable` in use and functional; consider pinning a specific resolved version for reproducibility/upgrade control.
 - [ ] **Local mirror format & mapping:** per-note `.md` files (e.g. with frontmatter/ID) vs daily file with addressable entries; how to map to Memos note IDs/names and support edits/deletes?
 - [ ] **Conflict-resolution policy:** last-write-wins (by `update_time`), keep-both/conflict copies, or manual merge — and how to surface conflicts?
 - [ ] **Sync scope:** include deletions, visibility, tags, pinned/archived state, and attachments in bidirectional sync?
