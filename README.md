@@ -68,4 +68,36 @@ A local-first Linux CLI/gateway (`memos`) with per-note mirror and bidirectional
 - [Manual](docs/MANUAL.md) — CLI usage and operations
 - [Phase 0 validation](docs/research/phase-0-validation.md) — platform/API validation notes
 
+## OpenCode Integration (MCP + Skill)
+
+This repo includes an OpenCode skill for managing memos via MCP: [`.agents/skills/usememos/`](.agents/skills/usememos/).
+
+**Skill name:** `usememos` — auto-triggers when you ask to create, list, search, update, or delete memos.
+
+**Setup:**
+1. Generate a Personal Access Token (PAT) in Memos: Settings → Access Tokens.
+2. Set env var: `export MEMOS_PAT="memos_xxx_your_admin_token"`
+3. Add to `~/.config/opencode/opencode.json`:
+   ```json
+   {
+     "mcp": {
+       "servers": {
+         "memos": {
+           "type": "remote",
+           "url": "https://<your-instance>/mcp",
+           "headers": { "Authorization": "Bearer {env:MEMOS_PAT}" },
+           "enabled": true
+         }
+       }
+     }
+   }
+   ```
+4. Restart OpenCode. Verify with `opencode mcp list`.
+
+**Files:**
+- `SKILL.md` — English (primary)
+- `SKILL.id.md` — Indonesian
+
+**Convention:** AI memos are tagged `#ai-generated` + topic tags, visibility `PROTECTED`. Human memos have no `#ai-generated` tag.
+
 
